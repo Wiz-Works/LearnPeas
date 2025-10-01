@@ -91,10 +91,10 @@ High-priority findings marked with bright `[!!! CRITICAL !!!]` alerts:
 ### Piped Execution
 ```bash
 # Run directly from URL (extended mode by default)
-curl -sL https://your-server/learnpeas.sh | bash
+curl -sL http://your-server/learnpeas.sh | bash
 
 # Quick scan from URL
-curl -sL https://your-server/learnpeas.sh | bash -s -- --quick
+curl -sL http://your-server/learnpeas.sh | bash -s -- --quick
 ```
 
 ### All Options
