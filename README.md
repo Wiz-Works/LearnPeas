@@ -159,12 +159,10 @@ LearnPEAS teaches you to **think** like a privilege escalation expert:
 
 | Feature | LinPEAS | LearnPEAS |
 |---------|---------|-----------|
-| Speed | Very fast | Moderate (educational detail) |
-| Output Volume | High | Structured & explained |
+| Output Volume | High | Low but structured & explained |
 | Learning Focus | Low | **Very High** |
 | Exploitation Guidance | Minimal | **Detailed step-by-step** |
 | CTF-Specific Features | Limited | **Flag hunting, cloud metadata, etc.** |
-| Critical Findings Highlight | Colors | **Bright red CRITICAL alerts** |
 | Educational Concepts | None | **Full WHAT/WHY/HOW framework** |
 
 LearnPEAS is **not a replacement** for LinPEAS - it's a **learning companion**. Use LinPEAS for speed, use LearnPEAS to understand what you found and why it matters.
@@ -175,15 +173,6 @@ LearnPEAS is **not a replacement** for LinPEAS - it's a **learning companion**. 
 ```bash
 # Initial foothold - understand what you have
 ./learnpeas.sh
-
-# Full enumeration for difficult boxes
-./learnpeas.sh --extended
-```
-
-### OSCP Practice
-```bash
-# Learn common privilege escalation vectors
-./learnpeas.sh --extended
 
 # Review the log file to understand each finding
 cat /tmp/teachpeas_*.log
@@ -208,41 +197,6 @@ The script produces findings in priority order:
 5. **[LEARN]** - Educational explanations (can be disabled with `--no-explain`)
 6. **[OK]** - Confirmations that security controls are working
 
-## 🛡️ Extended Module Features
-
-The `--extended` flag enables additional checks:
-
-### Cloud Metadata Enumeration
-- AWS EC2 instance metadata (IAM credentials)
-- Azure instance metadata (managed identities)
-- GCP metadata (service account tokens)
-
-### Language-Specific Credential Discovery
-- .env files (Laravel, Node.js, Rails)
-- package.json secrets (Node.js)
-- composer.json credentials (PHP)
-- Python virtual environments
-- ASP.NET configuration files
-
-### Database Enumeration
-- MySQL/MariaDB (default creds, socket access)
-- PostgreSQL (COPY TO PROGRAM exploitation)
-- MongoDB (unauthenticated access)
-- Redis (config manipulation)
-- MSSQL (xp_cmdshell)
-
-### CI/CD Secret Exposure
-- Git configuration with embedded tokens
-- GitLab CI secrets
-- GitHub Actions workflows
-- Jenkins credentials
-- Docker registry credentials
-
-### CTF Flag Hunting
-- Common flag file locations (root.txt, user.txt)
-- Flag pattern matching (HTB{}, THM{}, flag{})
-- Base64-encoded flags
-- Steganography hints
 
 ## ⚠️ Important Notes
 
