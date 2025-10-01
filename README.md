@@ -69,18 +69,6 @@ High-priority findings marked with bright `[!!! CRITICAL !!!]` alerts:
 - GTFOBins integration for exploitation guidance
 - Logs everything to `/tmp/teachpeas_*.log` for reference
 
-## 📥 Installation
-
-```bash
-# Download
-curl -sL https://raw.githubusercontent.com/yourusername/learnpeas/main/learnpeas7.sh -o learnpeas.sh
-
-# Make executable
-chmod +x learnpeas.sh
-
-# Run
-./learnpeas.sh
-```
 
 ## 🚀 Usage
 
