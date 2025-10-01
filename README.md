@@ -4,6 +4,10 @@
 
 A comprehensive Linux privilege escalation enumeration script designed for **learning** and **understanding**, not just finding vulnerabilities. Every finding includes educational context explaining WHAT it is, WHY it matters, and HOW to exploit it.
 
+## ⚠️ Disclaimer
+
+This project is **not affiliated with or endorsed by** the [PEASS-ng project](https://github.com/peass-ng/PEASS-ng/tree/master/linPEAS). LearnPEAS is an independent tool inspired by LinPEAS, designed specifically for educational purposes. All credit for the original PEAS enumeration framework goes to the PEASS-ng team.
+
 ## 🎯 Purpose
 
 LearnPEAS is built for penetration testing students, CTF players, and red teamers who want to:
