@@ -179,7 +179,7 @@ HOW TO EXPLOIT:
 
 ### Sudo CVE Detection
 ```
-[!!! CRITICAL !!!] Sudo vulnerable to Baron Samedit (CVE-2021-3156) - Heap overflow
+[!!! CRITICAL !!!] Sudo vulnerable to CVE-2025-32463 - Privilege escalation
 
 [VULNERABLE] sudo < 1.9.16p1 vulnerable
 
