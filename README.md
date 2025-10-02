@@ -1,6 +1,6 @@
 # LearnPEAS - Educational Linux Privilege Escalation Enumeration
 
-**TeachPEAS: The Red Team's Privilege Escalation Bible**
+**LearnPEAS: The Red Team's Privilege Escalation Bible**
 
 A comprehensive Linux privilege escalation enumeration script designed for **learning** and **understanding**, not just finding vulnerabilities. Every finding includes educational context explaining WHAT it is, WHY it matters, and HOW to exploit it.
 
@@ -42,9 +42,14 @@ Critical findings include:
 - Dangerous Linux capabilities
 - Writable cron directories
 - Kernel vulnerabilities (DirtyCOW, Dirty Pipe)
+- Sudo version CVEs (Baron Samedit, sudoedit bypass, etc.)
+- Polkit/pkexec vulnerabilities (PwnKit)
 - Active SMB services with guest access
 - Exposed .git directories with source code
 - Tomcat manager with default credentials
+- Cloud metadata service access (AWS/Azure/GCP)
+- Writable systemd services and timers
+- Python library path hijacking opportunities
 
 ### Comprehensive Coverage
 
@@ -54,42 +59,39 @@ Critical findings include:
 - User enumeration
 - Running processes
 - SUDO permissions analysis
+- **Sudo version CVE detection** (Baron Samedit, sudoedit bypass, Runas bypass, and more)
 - SUID/SGID binaries
 - Linux capabilities
 - Cron jobs
-- Systemd services
+- Systemd services and timers
 - Kernel exploit detection
 - Container detection & escape
 - PATH hijacking
 - Special group membership
 - Writable sensitive files
 - Password & credential hunting
+- Polkit/pkexec analysis (including PwnKit)
+- Snap package security
+- LD.SO.PRELOAD analysis
 
 **Application Service Enumeration:**
-- SMB/Samba shares (null sessions, guest access)
-- Exposed .git directories (source code disclosure)
-- Apache Tomcat manager (default credentials, WAR upload)
-- Spring Boot actuators (exposed endpoints, credentials)
-- WordPress vulnerabilities (plugins, xmlrpc, config backups)
+- **SMB/Samba shares** (null sessions, guest access, writable shares with service validation)
+- **Exposed .git directories** (source code disclosure, credential extraction, commit history)
+- **Apache Tomcat manager** (default credentials, WAR upload, tomcat-users.xml)
+- **Spring Boot actuators** (exposed endpoints, environment variables, heap dumps)
+- **WordPress vulnerabilities** (plugins, themes, xmlrpc.php, wp-json API, config backups)
 
 **Extended Enumeration** (Enabled by default):
-- Cloud metadata services (AWS/Azure/GCP)
-- Language-specific credential discovery (.env, package.json, composer.json)
-- Enhanced database enumeration (MySQL, PostgreSQL, MongoDB, Redis)
-- Web application analysis
-- CI/CD secret exposure (Git, Jenkins, GitLab)
-- Post-exploitation techniques
-- CTF flag hunting (opt-in with --flags)
-- Network pivoting setup
-
-### Smart Design
-- Avoids false positives with service status validation
-- Whitelist filtering for legitimate SUID/SGID binaries
-- Only flags active misconfigurations (e.g., SMB checks if service is running)
-- GTFOBins integration for exploitation guidance
-- Logs everything to `/tmp/teachpeas_*.log` for reference
-- Critical findings summary at end of scan
-- Separate CTF flag summary
+- **Cloud metadata services** (AWS EC2, Azure managed identity, GCP service accounts)
+- **Language-specific credential discovery** (.env, package.json, composer.json, Python venvs, Gemfiles, ASP.NET configs)
+- **Enhanced database enumeration** (MySQL history, PostgreSQL, MongoDB unauthenticated access, Redis, MSSQL, database dumps)
+- **Web application analysis** (config files, writable web roots, framework-specific vulnerabilities)
+- **CI/CD secret exposure** (Git config tokens, GitLab CI, GitHub Actions, Jenkins credentials, Docker registry auth)
+- **Post-exploitation techniques** (persistence mechanisms, lateral movement prep)
+- **CTF flag hunting** (opt-in with --flags)
+- **Network pivoting setup** (SSH tunneling, internal network detection)
+- **Python library path hijacking** (writable sys.path directories)
+- **MAC profile writability** (AppArmor/SELinux policy modification)
 
 ## 🚀 Usage
 
@@ -175,14 +177,33 @@ HOW TO EXPLOIT:
     3. Running as root inside container = root on host
 ```
 
+### Sudo CVE Detection
+```
+[!!! CRITICAL !!!] Sudo vulnerable to Baron Samedit (CVE-2021-3156) - Heap overflow
+
+[VULNERABLE] sudo < 1.9.5p2 vulnerable
+
+[LEARN] Heap overflow exploit. Works on most distros.
+[LEARN] GitHub: https://github.com/blasty/CVE-2021-3156
+```
+
+### Application Service Finding
+```
+[!!! CRITICAL !!!] SMB shares accessible with null session
+
+[VULNERABLE] Share backup is READABLE without authentication
+
+[LEARN] Access with: smbclient -N //127.0.0.1/backup
+```
+
 ### Regular Finding
 ```
 [VULNERABLE] Non-standard SUID binary: /usr/local/bin/custom_tool
     Owner: root | Permissions: 4755
   → Analysis steps:
-      strings /usr/local/bin/tool | grep -E 'system|exec|popen'
-      ltrace /usr/local/bin/tool 2>&1 | grep -E 'system|exec'
-      Check GTFOBins for: tool
+      strings /usr/local/bin/custom_tool | grep -E 'system|exec|popen'
+      ltrace /usr/local/bin/custom_tool 2>&1 | grep -E 'system|exec'
+      Check GTFOBins for: custom_tool
 ```
 
 ### End of Scan Summary
@@ -193,7 +214,9 @@ HOW TO EXPLOIT:
 Found instant privilege escalation opportunities:
 
 [!!! CRITICAL !!!] NOPASSWD vim - Instant root: sudo vim -c ':!/bin/sh'
+[!!! CRITICAL !!!] Sudo vulnerable to CVE-2021-3156 (Baron Samedit)
 [!!! CRITICAL !!!] DOCKER GROUP - Instant root: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash
+[!!! CRITICAL !!!] AWS METADATA ACCESSIBLE - Steal IAM credentials
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🚩 CTF FLAGS DISCOVERED
@@ -228,7 +251,7 @@ LearnPEAS complements other enumeration tools like LinPEAS by focusing on educat
 ./learnpeas.sh --flags
 
 # Review the log file to understand each finding
-cat /tmp/teachpeas_*.log
+cat /tmp/learnpeas_*.log
 ```
 
 ### Red Team Engagements
@@ -283,6 +306,7 @@ Contributions welcome! Areas for improvement:
 - More CTF-specific checks
 - Performance optimizations
 - Additional educational content
+- More CVE coverage
 
 ## 📄 License
 
@@ -305,7 +329,5 @@ Inspired by:
 ---
 
 **Remember**: The goal is to learn and understand, not just to root boxes. Take time to read the explanations and understand why each vulnerability exists. Building deep knowledge will make you a better penetration tester.
-
-Happy learning! 🎓🔓
 
 Happy learning! 🎓🔓
