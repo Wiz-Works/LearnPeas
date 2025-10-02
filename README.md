@@ -27,8 +27,14 @@ Perfect for **HackTheBox**, **TryHackMe**, and **OSCP** preparation.
 - **HOW**: Step-by-step exploitation guidance
 - **Real Examples**: Actual commands you can run immediately
 
-### Critical Finding Alerts
-High-priority findings marked with bright `[!!! CRITICAL !!!]` alerts:
+### Alert System
+High-priority findings with color-coded alerts:
+- **[!!! CRITICAL !!!]** (Red background) - Instant privilege escalation paths
+- **[🚩 CTF FLAG 🚩]** (Purple background) - CTF flag locations discovered
+- **[VULNERABLE]** - Exploitable misconfigurations
+- **[WARNING]** - Potential security issues
+
+Critical findings include:
 - NOPASSWD sudo entries
 - Writable /etc/passwd or /etc/shadow
 - Docker/LXD/Disk group membership
@@ -36,7 +42,9 @@ High-priority findings marked with bright `[!!! CRITICAL !!!]` alerts:
 - Dangerous Linux capabilities
 - Writable cron directories
 - Kernel vulnerabilities (DirtyCOW, Dirty Pipe)
-- And more...
+- Active SMB services with guest access
+- Exposed .git directories with source code
+- Tomcat manager with default credentials
 
 ### Comprehensive Coverage
 
@@ -57,30 +65,45 @@ High-priority findings marked with bright `[!!! CRITICAL !!!]` alerts:
 - Writable sensitive files
 - Password & credential hunting
 
-**Extended Enumeration** (`--extended` flag):
+**Application Service Enumeration:**
+- SMB/Samba shares (null sessions, guest access)
+- Exposed .git directories (source code disclosure)
+- Apache Tomcat manager (default credentials, WAR upload)
+- Spring Boot actuators (exposed endpoints, credentials)
+- WordPress vulnerabilities (plugins, xmlrpc, config backups)
+
+**Extended Enumeration** (Enabled by default):
 - Cloud metadata services (AWS/Azure/GCP)
 - Language-specific credential discovery (.env, package.json, composer.json)
 - Enhanced database enumeration (MySQL, PostgreSQL, MongoDB, Redis)
 - Web application analysis
 - CI/CD secret exposure (Git, Jenkins, GitLab)
 - Post-exploitation techniques
-- CTF flag hunting
+- CTF flag hunting (opt-in with --flags)
 - Network pivoting setup
 
 ### Smart Design
-- Avoids false positives with whitelist filtering
-- Distinguishes legitimate vs. dangerous findings
+- Avoids false positives with service status validation
+- Whitelist filtering for legitimate SUID/SGID binaries
+- Only flags active misconfigurations (e.g., SMB checks if service is running)
 - GTFOBins integration for exploitation guidance
 - Logs everything to `/tmp/teachpeas_*.log` for reference
-
+- Critical findings summary at end of scan
+- Separate CTF flag summary
 
 ## 🚀 Usage
 
-### Full Scan (Default - Extended Mode Enabled)
+### Full Scan (Extended Mode - Default)
 ```bash
 ./learnpeas.sh
 ```
-**Note:** Extended mode is ON by default for comprehensive enumeration.
+**Note:** Extended mode is enabled by default for comprehensive enumeration including cloud metadata, databases, web applications, CI/CD secrets, and application services.
+
+### Enable CTF Flag Hunting
+```bash
+./learnpeas.sh --flags
+```
+**Note:** Flag hunting is opt-in. Without `--flags`, the script will not search for or reveal CTF flags.
 
 ### Quick Scan (Skip slow checks)
 ```bash
@@ -92,10 +115,19 @@ High-priority findings marked with bright `[!!! CRITICAL !!!]` alerts:
 ./learnpeas.sh --no-explain
 ```
 
+### Combined Options
+```bash
+# Quick scan with flags and no explanations
+./learnpeas.sh --quick --flags --no-explain
+```
+
 ### Piped Execution
 ```bash
-# Run directly from URL (extended mode by default)
+# Run directly from URL
 curl -sL http://your-server/learnpeas.sh | bash
+
+# With flag hunting enabled
+curl -sL http://your-server/learnpeas.sh | bash -s -- --flags
 
 # Quick scan from URL
 curl -sL http://your-server/learnpeas.sh | bash -s -- --quick
@@ -103,14 +135,17 @@ curl -sL http://your-server/learnpeas.sh | bash -s -- --quick
 
 ### All Options
 ```bash
+Usage: ./learnpeas.sh [OPTIONS]
+
 Options:
   -q, --quick      Quick scan (skip some slow checks)
+  -f, --flags      Enable CTF flag hunting (searches for and reveals flags)
   -v, --verbose    Verbose output
   --no-explain     Skip educational explanations
   -h, --help       Show help message
 
 Note: Extended mode is ALWAYS enabled by default (cloud metadata, databases, 
-web apps, CI/CD, CTF flags, etc.)
+web apps, CI/CD, application services, etc.)
 ```
 
 ## 📊 Output Examples
@@ -145,9 +180,30 @@ HOW TO EXPLOIT:
 [VULNERABLE] Non-standard SUID binary: /usr/local/bin/custom_tool
     Owner: root | Permissions: 4755
   → Analysis steps:
-      strings /usr/local/bin/custom_tool | grep -E 'system|exec|popen'
-      ltrace /usr/local/bin/custom_tool 2>&1 | grep -E 'system|exec'
-      Check GTFOBins for: custom_tool
+      strings /usr/local/bin/tool | grep -E 'system|exec|popen'
+      ltrace /usr/local/bin/tool 2>&1 | grep -E 'system|exec'
+      Check GTFOBins for: tool
+```
+
+### End of Scan Summary
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️  CRITICAL FINDINGS SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Found instant privilege escalation opportunities:
+
+[!!! CRITICAL !!!] NOPASSWD vim - Instant root: sudo vim -c ':!/bin/sh'
+[!!! CRITICAL !!!] DOCKER GROUP - Instant root: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚩 CTF FLAGS DISCOVERED
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Flag locations found:
+
+[🚩 CTF FLAG 🚩] USER FLAG READABLE: /home/user/user.txt
+[🚩 CTF FLAG 🚩] ROOT FLAG READABLE: /root/root.txt
+
+[INFO] Rerun with --flags to reveal the flags
 ```
 
 ## 🎓 Learning Philosophy
@@ -159,17 +215,7 @@ LearnPEAS teaches you to **think** like a privilege escalation expert:
 3. **Mental Models**: Build frameworks for approaching privilege escalation systematically
 4. **Manual Verification**: Always test findings manually, don't just trust automated tools
 
-## 🔍 What Makes This Different?
-
-| Feature | LinPEAS | LearnPEAS |
-|---------|---------|-----------|
-| Output Volume | High | Low but structured & explained |
-| Learning Focus | Low | **Very High** |
-| Exploitation Guidance | Minimal | **Detailed step-by-step** |
-| CTF-Specific Features | Limited | **Flag hunting, cloud metadata, etc.** |
-| Educational Concepts | None | **Full WHAT/WHY/HOW framework** |
-
-LearnPEAS is **not a replacement** for LinPEAS - it's a **learning companion**. Use LinPEAS for speed, use LearnPEAS to understand what you found and why it matters.
+LearnPEAS complements other enumeration tools like LinPEAS by focusing on education rather than speed. Use it when you want to learn and understand privilege escalation deeply, not just find quick wins.
 
 ## 🎯 Use Cases
 
@@ -177,6 +223,9 @@ LearnPEAS is **not a replacement** for LinPEAS - it's a **learning companion**. 
 ```bash
 # Initial foothold - understand what you have
 ./learnpeas.sh
+
+# Enable flag hunting to find objectives
+./learnpeas.sh --flags
 
 # Review the log file to understand each finding
 cat /tmp/teachpeas_*.log
@@ -195,12 +244,12 @@ cat /tmp/teachpeas_*.log
 The script produces findings in priority order:
 
 1. **[!!! CRITICAL !!!]** - Instant root or near-instant privilege escalation
-2. **[VULNERABLE]** - Exploitable findings requiring some work
-3. **[WARNING]** - Potential issues worth investigating
-4. **[INFO]** - General information about the system
-5. **[LEARN]** - Educational explanations (can be disabled with `--no-explain`)
-6. **[OK]** - Confirmations that security controls are working
-
+2. **[🚩 CTF FLAG 🚩]** - CTF flag locations (only with --flags)
+3. **[VULNERABLE]** - Exploitable findings requiring some work
+4. **[WARNING]** - Potential issues worth investigating
+5. **[INFO]** - General information about the system
+6. **[LEARN]** - Educational explanations (can be disabled with `--no-explain`)
+7. **[OK]** - Confirmations that security controls are working
 
 ## ⚠️ Important Notes
 
@@ -256,5 +305,7 @@ Inspired by:
 ---
 
 **Remember**: The goal is to learn and understand, not just to root boxes. Take time to read the explanations and understand why each vulnerability exists. Building deep knowledge will make you a better penetration tester.
+
+Happy learning! 🎓🔓
 
 Happy learning! 🎓🔓
