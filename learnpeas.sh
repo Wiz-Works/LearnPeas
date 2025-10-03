@@ -456,7 +456,7 @@ enum_sudo_version() {
 enum_sudo2() {
     log "${COLOR_PURPLE}[SUDO PERMISSIONS]${COLOR_RESET}"
     if sudo -l 2>&1 | grep -v "not allowed"; then
-        warn "Sudo access confirmed"
+        critical "Sudo access confirmed"
         return 0
     else
         warn "No sudo access"
