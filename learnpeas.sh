@@ -1,5 +1,5 @@
 #!/bin/bash
-# TeachPEAS - The Red Team's Privilege Escalation Bible
+# LearnPEAS: Privilege Escalation In-Field Educational Tool
 # Comprehensive enumeration + education for HTB/THM environments
 
 set -o pipefail
