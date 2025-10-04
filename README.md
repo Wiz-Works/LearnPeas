@@ -80,77 +80,29 @@ THE TECHNICAL FLAW:
   5. Attacker overwrites function pointers to execute their code
   6. Since sudo runs as root, the attacker's code runs as root
 
-WHY IT'S CALLED BARON SAMEDIT:
-  Play on words: 'Sudo edit' → 'Baron Samedit'
-  The vulnerability is in sudoedit, a symlink to sudo
-
 HOW TO EXPLOIT:
   1. Check if vulnerable:
      sudoedit -s / (if you get usage error = vulnerable)
   2. Download exploit:
      https://github.com/blasty/CVE-2021-3156
-     https://github.com/worawit/CVE-2021-3156
-  3. Compile the exploit (usually a C program):
-     gcc exploit.c -o exploit
-  4. Run it:
-     ./exploit
-  5. Get root shell
-
-WHY IT WORKS:
-  • No sudo privileges needed (any user can exploit)
-  • No password required
-  • Works on most Linux distributions
-  • Vulnerability existed for 10+ years (since 2011)
+  3. Compile and run the exploit
+  4. Get root shell
 
 IMPACT: Any user → Root, no credentials needed
 ```
 
-### Example: Container Escape Detection
-
-```
-[WARNING] Running inside a DOCKER container
-
-[INFO] Checking if container is privileged...
-[!!! CRITICAL !!!] PRIVILEGED CONTAINER - Full host access possible
-[VULNERABLE] Container is PRIVILEGED!
-
-╔════════════════════════════════════════════════════════════╗
-║  Privileged Container Escape
-╚════════════════════════════════════════════════════════════╝
-
-WHAT: Privileged containers have almost all capabilities and can 
-      access host devices.
-
-WHY IT MATTERS: The --privileged flag disables most security features.
-                It's used for nested Docker, device access, etc. But it 
-                allows mounting host filesystem and accessing host resources.
-
-HOW TO EXPLOIT:
-  1. List host disks: fdisk -l
-  2. Mount host root: mkdir /mnt/host && mount /dev/sda1 /mnt/host
-  3. Chroot to host: chroot /mnt/host /bin/bash
-  4. Alternative: Access /dev/mem or /dev/kmem for direct memory access
-
-[LEARN] Privileged escape steps:
-[LEARN]   fdisk -l  # Find host disk (usually /dev/sda1 or /dev/vda1)
-[LEARN]   mkdir /mnt/host
-[LEARN]   mount /dev/sda1 /mnt/host
-[LEARN]   chroot /mnt/host /bin/bash
-[LEARN]   # You're now on the host as root
-```
-
 ## Key Features
 
-### Concept Explanations
-Every vulnerability type includes a detailed breakdown:
+### Comprehensive Educational Content
+Every vulnerability type includes:
 - **WHAT**: Clear definition of the vulnerability
-- **WHY**: Why it exists and why it matters
+- **WHY**: Why it exists and why it matters  
 - **HOW**: Step-by-step exploitation guidance
 - **Real Examples**: Actual commands you can run immediately
 
 ### High-Priority Findings with Color-Coded Alerts
 - **[!!! CRITICAL !!!]** (Red background) - Instant privilege escalation paths
-- **[🚩 CTF FLAG 🚩]** (Purple background) - CTF flag locations discovered
+- **[🚩 CTF FLAG 🚩]** (Purple background) - CTF flag locations discovered (opt-in only)
 - **[VULNERABLE]** - Exploitable misconfigurations
 - **[WARNING]** - Potential security issues
 
@@ -169,9 +121,9 @@ Every vulnerability type includes a detailed breakdown:
 
 **Core Checks:**
 - System fingerprinting
-- Network configuration with localhost service identification
+- Enhanced network configuration with localhost service identification
 - User enumeration
-- Running processes
+- Running processes with credential detection
 - SUDO permissions with version-specific CVE detection
 - SUID/SGID binaries with GTFOBins integration
 - Linux capabilities with detailed exploitation
@@ -182,9 +134,9 @@ Every vulnerability type includes a detailed breakdown:
 - Special group membership (docker, lxd, disk, sudo)
 - Writable sensitive files
 - Password & credential hunting
-- Polkit/pkexec analysis (PwnKit)
+- Polkit/pkexec analysis (PwnKit CVE-2021-4034)
 
-**Extended Enumeration (Enabled by default):**
+**Extended Enumeration (Always Enabled):**
 - Cloud metadata services (AWS EC2, Azure, GCP)
 - Language-specific credential discovery (.env, package.json, etc.)
 - Enhanced database enumeration (MySQL, PostgreSQL, MongoDB, Redis)
@@ -195,7 +147,21 @@ Every vulnerability type includes a detailed breakdown:
 - Apache Tomcat manager detection
 - Spring Boot actuators
 - WordPress extended enumeration
-- CTF flag hunting (opt-in with --flags)
+- Software version checking
+- Hidden files and directories
+- API keys and token discovery
+- Python library path hijacking
+- LD.SO.PRELOAD analysis
+- Systemd timer analysis
+- Snap package confinement
+- AppArmor/SELinux writable profiles
+- Wildcard injection opportunities
+
+**CTF-Specific Features (Opt-In):**
+- Flag hunting with common patterns (HTB{}, THM{}, CTF{}, flag{})
+- Base64-encoded flag detection
+- Flag file discovery (/root/root.txt, /home/*/user.txt)
+- Environment variable flag search
 
 ## Usage
 
@@ -203,14 +169,14 @@ Every vulnerability type includes a detailed breakdown:
 ./learnpeas.sh
 ```
 
-**Note:** Extended mode is enabled by default for comprehensive enumeration including cloud metadata, databases, web applications, CI/CD secrets, and application services.
+**Note:** Extended mode is permanently enabled and includes all enumeration modules by default.
 
 ### Enable CTF Flag Hunting
 ```bash
 ./learnpeas.sh --flags
 ```
 
-**Note:** Flag hunting is opt-in. Without `--flags`, the script will not search for or reveal CTF flags.
+**Important:** Flag hunting is **opt-in only**. Without the `--flags` flag, the script will NOT search for or reveal CTF flags. This prevents accidental spoilers in learning environments.
 
 ### Quick Scan
 ```bash
@@ -229,19 +195,19 @@ Options:
   --no-explain     Skip educational explanations
   -h, --help       Show help message
 
-Note: Extended mode is ALWAYS enabled by default (cloud metadata, databases,
-      web apps, CI/CD, application services, etc.)
+Note: Extended enumeration is ALWAYS enabled (includes cloud metadata, databases,
+      web apps, CI/CD secrets, application services, etc.)
 ```
 
 ## Interactive Features
 
 ### Skippable Long-Running Checks
 LearnPEAS allows you to skip time-consuming checks by pressing **ENTER**:
-- API key and token discovery (searches through /home, /var/www, /opt, /etc, /tmp)
-- Process monitoring for hidden cron jobs (60-second watch)
-- Password and credential hunting (extensive file searches)
+- **API key and token discovery** - Searches through /home, /var/www, /opt, /etc, /tmp for AWS keys, GitHub tokens, API keys
+- **Process monitoring** - 60-second watch for hidden cron jobs
+- **Password and credential hunting** - Extensive file searches across the filesystem
 
-Simply press ENTER during these checks to continue to the next enumeration section.
+Simply press ENTER during these checks to continue to the next enumeration section. This gives you control over scan duration while maintaining thoroughness.
 
 ## Educational Philosophy
 
@@ -278,7 +244,7 @@ Found instant privilege escalation opportunities:
 # Review the log file to understand each finding
 cat /tmp/learnpeas_*.log
 
-# Targeted enumeration (quieter, less noisy)
+# Quick enumeration without explanations (less noisy)
 ./learnpeas.sh --quick --no-explain
 ```
 
@@ -305,10 +271,11 @@ This tool is designed for:
 
 ## Performance Notes
 
-- Some checks can be slow on large filesystems (multiple `find /` commands)
-- Extended mode adds significant runtime but provides comprehensive coverage
+- Extended enumeration adds significant runtime but provides comprehensive coverage
+- API key scanning can take several minutes on systems with large filesystems
+- Process monitoring runs for 60 seconds but can be skipped
 - Use `--quick` mode if time is critical
-- Long-running checks (API keys, process monitoring) can be skipped by pressing ENTER
+- Long-running checks (API keys, process monitoring, password hunting) can be skipped by pressing ENTER
 
 ## Operational Security
 
@@ -316,6 +283,7 @@ This script is **not stealthy**. On monitored systems:
 - Multiple find commands will be logged
 - Process enumeration is visible
 - File access attempts are auditable
+- Extended searches trigger IDS/HIDS alerts
 
 For real red team engagements, use targeted manual checks instead.
 
@@ -328,6 +296,7 @@ Contributions welcome! Areas for improvement:
 - Performance optimizations
 - Additional educational content
 - More CVE coverage
+- Enhanced container escape techniques
 
 ## Credits
 
