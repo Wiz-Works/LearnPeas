@@ -11024,7 +11024,7 @@ EOF
     echo -e "\033[32mMMMMMMMMMMMM\033[0m                                     \033[34mMMMMMMMMMMMM\033[0m                            "
     cat << "EOF"
     
-              Educational Privilege Escalation Tool - Version 1.7.0
+              Educational Privilege Escalation Tool - Version 1.8.5
                               Made by Wiz-Works
     ════════════════════════════════════════════════════════════════
 
