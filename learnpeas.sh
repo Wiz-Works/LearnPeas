@@ -30,7 +30,7 @@ ok() { log "${G}[OK]${RST} $1"; }
 warn() { log "${Y}[WARNING]${RST} $1"; }
 teach() { [ $EXPLAIN -eq 1 ] && log "${Y}[LEARN]${RST} $1"; }
 critical() { log "${CRIT}[!!! CRITICAL !!!]${RST} $1"; }
-ctf_flag() { log "${FLAG}[🚩 CTF FLAG 🚩]${RST} $1"; }  # ADD THIS LINE
+ctf_flag() { log "${FLAG}[🚩 CTF FLAG 🚩]${RST} $1"; }  
 
 # === EDUCATIONAL FRAMEWORK ===
 explain_concept() {
