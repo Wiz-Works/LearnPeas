@@ -18,7 +18,7 @@ VERBOSE=0
 EXPLAIN=1
 QUICK_MODE=0
 EXTENDED=1
-SHOW_FLAGS=0  # ADD THIS LINE
+SHOW_FLAGS=0 
 LOG_FILE="/tmp/teachpeas_$(date +%s).log"
 
 # === LOGGING ===
